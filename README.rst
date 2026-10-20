@@ -15,13 +15,38 @@ It is a diagnostic scanner, not an autotuner.
 Status
 ======
 
-Early scaffolding. Implemented today:
+Early. Implemented today:
 
 * ``shardscope env`` -- reproducibility snapshot (Python, PyTorch, CUDA,
   cuDNN, NCCL, device inventory, whether this host can run DDP at all).
+* ``examples/train_single.py`` -- the tiny fixed-seed training fixture that
+  later profiling runs measure. Runs on CPU, MPS or CUDA; emits per-step
+  CSV plus an environment and summary sidecar.
 
 Not implemented yet: ``shardscope profile``, ``shardscope report``,
 ``shardscope bench``. They exit non-zero rather than pretending to work.
+
+The training fixture
+====================
+
+.. code-block:: console
+
+   $ python examples/train_single.py --steps 100 --device auto --out-dir runs/baseline
+
+Two switches exist because they change what the number *means*, not just how
+fast it is:
+
+``--no-sync``
+  Stops synchronizing the device around each step. Timings then measure
+  kernel launch rather than execution, and the run says so in its output.
+  On an M4 Max this reads roughly half the synchronized step time -- which
+  is how a bogus speedup gets published.
+
+``--data-residency {host,device}``
+  ``host`` copies each batch to the device per step, so a host-to-device
+  transfer exists and can be measured. ``device`` pre-places the whole
+  dataset, so no such transfer exists at all. Both paths train on identical
+  batches in an identical order, so their step times are comparable.
 
 Honest-measurement rules
 ========================

@@ -48,7 +48,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/shardscope"]
+source = ["src/shardscope", "examples"]
 branch = true
 
 [tool.coverage.report]
