@@ -16,8 +16,9 @@ Reference convention source: @@REFERENCE_STATUS@@
 ## Preconditions
 
 1. `.shardscope-commit-auth.json` exists with `authorized: true` and the
-   student's verified name/email. The student creates this file; an agent
-   must not flip `authorized` to true.
+   student's verified name/email. An agent may set `authorized: true` only
+   on the student's explicit, recorded authorization for this repository --
+   never on its own initiative and never inferred from silence.
 2. `git config --local user.name` / `user.email` match that identity.
 3. Tests pass. The helper runs them; do not bypass with `--skip-tests`.
 
