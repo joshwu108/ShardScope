@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install project
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          . .venv/bin/activate
+          ruff check .
+          ruff format --check .
+
+      - name: Tests with coverage gate
+        run: |
+          . .venv/bin/activate
+          pytest -q --cov --cov-report=term-missing
+
+      - name: Commit skill bootstrap is reproducible from a clean checkout
+        run: |
+          . .venv/bin/activate
+          python tools/bootstrap_commit_skill.py || true
+          test -f .agents/skills/commit/SKILL.md
+          python tools/bootstrap_commit_skill.py --check
+
+      - name: Ignore policy holds
+        run: |
+          git check-ignore -q planning/ShardScope_PRD.md || (echo "planning/ not ignored" && exit 1)
+          git check-ignore -q .agents/skills/commit/SKILL.md || (echo "local SKILL.md not ignored" && exit 1)
+          test -z "$(git ls-files '*.md' '*.markdown' '*.mdx' 'planning/*')" || (echo "markdown/planning tracked" && exit 1)
+          git ls-files --error-unmatch .gitignore
