@@ -1,15 +1,435 @@
-"""Report rendering tests -- Week 3.
+"""Report rendering: availability, escaping, round trips, no-fabrication.
 
-The key invariant under test later: a report must label profiled diagnostic
-figures separately from unprofiled throughput figures (requirement SS-04).
+Two invariants carry most of these tests:
+
+* A report labels profiled diagnostic figures separately from unprofiled
+  throughput figures (requirement SS-04), and says so in words.
+* A measurement nobody recorded is rendered as absent, with the reason --
+  never as 0, never as an empty cell that reads like 0 (PRD v2.0 section 8
+  "Guardrails").
 """
+
+from __future__ import annotations
+
+import json
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Week 3: blocked on report.py implementation.")
+from conftest import GOOD_ENVIRONMENT, GOOD_STEPS_CSV, GOOD_SUMMARY
+from shardscope.artifacts import STEP_COLUMNS, STEPS_CSV, RunArtifacts, load_run
+from shardscope.availability import (
+    NOT_OBSERVED,
+    NOT_RECORDED,
+    RECORDED,
+    REPORT_FIELDS,
+    field_statuses,
+)
+from shardscope.errors import ReportError, ShardScopeError
+from shardscope.report import (
+    REPORT_FORMATS,
+    format_for_path,
+    render,
+    render_html,
+    render_json,
+    render_steps_csv,
+    write_report,
+)
+
+HEADER = ",".join(STEP_COLUMNS)
 
 
-def test_report_separates_profiled_and_unprofiled_sections(): ...
+def _csv(*rows: str) -> str:
+    return "\n".join((HEADER, *rows)) + "\n"
 
 
-def test_report_never_sums_overlapping_durations_into_a_percentage(): ...
+def _status(run, field):
+    return next(status for status in field_statuses(run) if status.field == field)
+
+
+def _with_extra(**items):
+    return {**GOOD_ENVIRONMENT, "extra": {**GOOD_ENVIRONMENT["extra"], **items}}
+
+
+class TestFieldAvailability:
+    def test_every_prd_core_report_field_gets_a_status(self, make_run):
+        run = load_run(make_run())
+
+        assert tuple(status.field for status in field_statuses(run)) == REPORT_FIELDS
+
+    def test_step_time_is_recorded_from_the_csv(self, make_run):
+        status = _status(load_run(make_run()), "step_time_ms")
+
+        assert status.state == RECORDED
+        assert STEPS_CSV in status.detail
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "data_wait_ms",
+            "h2d_copy_ms",
+            "gpu_activity",
+            "collective_activity",
+            "per_rank_step_ms",
+            "suspected_bottleneck",
+            "confidence_or_visibility",
+            "evidence_refs",
+        ],
+    )
+    def test_an_unmeasured_field_is_absent_with_a_reason(self, make_run, field):
+        status = _status(load_run(make_run()), field)
+
+        assert status.state in (NOT_RECORDED, NOT_OBSERVED)
+        assert len(status.detail) > 20, status.detail
+
+    @pytest.mark.parametrize("field", ["data_wait_ms", "suspected_bottleneck"])
+    def test_a_field_blocked_on_a_decision_names_the_gate(self, make_run, field):
+        # "Unimplemented" and "waiting on a decision the student owns" are
+        # different states; the report must not blur them.
+        assert "GATE" in _status(load_run(make_run()), field).detail
+
+    def test_gpu_activity_is_not_observed_when_the_run_recorded_no_cuda_device(self, make_run):
+        status = _status(load_run(make_run()), "gpu_activity")
+
+        assert status.state == NOT_OBSERVED
+        assert "0" in status.detail and "CUDA" in status.detail
+
+    def test_gpu_activity_on_a_cuda_host_is_merely_unrecorded(self, make_run):
+        environment = {
+            **GOOD_ENVIRONMENT,
+            "cuda_available": True,
+            "cuda_version": "12.4",
+            "device_count": 1,
+            "device_names": ["NVIDIA A100"],
+        }
+
+        status = _status(load_run(make_run(environment=environment)), "gpu_activity")
+
+        # The host could have produced kernel activity; nothing captured it.
+        assert status.state == NOT_RECORDED
+        assert "GATE 2" in status.detail
+
+    def test_collectives_are_not_observed_on_a_host_that_cannot_run_ddp(self, make_run):
+        environment = {
+            **GOOD_ENVIRONMENT,
+            "cuda_available": True,
+            "device_count": 1,
+            "device_names": ["NVIDIA A100"],
+        }
+
+        status = _status(load_run(make_run(environment=environment)), "collective_activity")
+
+        assert status.state == NOT_OBSERVED
+        assert "1" in status.detail
+
+    def test_collectives_on_a_two_gpu_host_are_merely_unrecorded(self, make_run):
+        environment = {
+            **GOOD_ENVIRONMENT,
+            "cuda_available": True,
+            "device_count": 2,
+            "device_names": ["NVIDIA A100", "NVIDIA A100"],
+        }
+
+        status = _status(load_run(make_run(environment=environment)), "collective_activity")
+
+        assert status.state == NOT_RECORDED
+
+    def test_the_ddp_capability_rule_is_the_one_env_py_defines(self, make_run):
+        # Two spellings of "can this host run DDP" is how a report comes to
+        # claim a distributed result from a host that cannot run one.
+        from shardscope.env import distributed_capable
+
+        assert distributed_capable(cuda_available=True, device_count=2) is True
+        assert distributed_capable(cuda_available=True, device_count=1) is False
+        assert distributed_capable(cuda_available=False, device_count=4) is False
+
+    def test_host_residency_reports_an_unmeasured_copy(self, make_run):
+        status = _status(load_run(make_run()), "h2d_copy_ms")
+
+        assert status.state == NOT_RECORDED
+        assert "host" in status.detail
+
+    def test_device_residency_reports_the_copy_as_structurally_absent(self, make_run):
+        run = load_run(make_run(steps_csv=_csv("0,1.0,2.0,device,True")))
+
+        status = _status(run, "h2d_copy_ms")
+
+        assert status.state == NOT_OBSERVED
+        assert "GATE 1.2" in status.detail
+        # Structurally absent is not zero milliseconds.
+        assert "0 ms" not in status.detail
+
+    def test_mixed_residency_rows_are_reported_rather_than_averaged(self, make_run):
+        run = load_run(make_run(steps_csv=_csv("0,1.0,2.0,host,True", "1,1.0,2.0,device,True")))
+
+        detail = _status(run, "h2d_copy_ms").detail
+
+        assert "device" in detail and "host" in detail
+
+    def test_the_profiling_status_is_recorded_when_the_run_recorded_it(self, make_run):
+        assert _status(load_run(make_run()), "profiled").state == RECORDED
+
+    def test_an_unrecorded_profiling_status_is_absent_not_false(self, make_run):
+        extra = {k: v for k, v in GOOD_ENVIRONMENT["extra"].items() if k != "profiled"}
+        run = load_run(make_run(environment={**GOOD_ENVIRONMENT, "extra": extra}))
+
+        status = _status(run, "profiled")
+
+        assert status.state == NOT_RECORDED
+        assert "unprofiled" not in status.detail.lower().replace("not unprofiled", "")
+
+    def test_a_trace_sidecar_is_listed_as_evidence_without_being_interpreted(self, make_run):
+        run = load_run(make_run(extra_files=("trace_rank_0.json",)))
+
+        status = _status(run, "evidence_refs")
+
+        assert "trace_rank_0.json" in status.detail
+        assert status.state == NOT_RECORDED
+
+    def test_an_unreadable_device_count_is_treated_as_no_device(self, make_run):
+        # Provenance is preserved verbatim, so a damaged device_count reaches
+        # the report. Guessing a device count would be worse than reporting
+        # that nothing could be observed.
+        environment = {**GOOD_ENVIRONMENT, "cuda_available": True, "device_count": "two"}
+
+        status = _status(load_run(make_run(environment=environment)), "gpu_activity")
+
+        assert status.state == NOT_OBSERVED
+
+    def test_the_run_manifest_names_the_provenance_files_found(self, make_run):
+        status = _status(load_run(make_run()), "run_manifest")
+
+        assert status.state == RECORDED
+        assert "environment.json" in status.detail
+
+
+class TestHtmlReport:
+    def test_renders_a_self_contained_document(self, make_run):
+        html = render_html(load_run(make_run("baseline")))
+
+        assert html.startswith("<!DOCTYPE html>")
+        assert html.rstrip().endswith("</html>")
+        assert "baseline" in html
+        # No scripts and no network fetches: a report is read from disk, and
+        # a trace can carry arbitrary strings from the profiled program.
+        assert "<script" not in html.lower()
+        assert "http://" not in html and "https://" not in html
+
+    def test_text_from_the_run_is_escaped(self, make_run):
+        hostile = "<script>alert('xss')</script>"
+        environment = {
+            **_with_extra(config_file=f'cfg "{hostile}".json', source=hostile),
+            "platform": hostile,
+            "device_names": [hostile],
+        }
+
+        html = render_html(load_run(make_run(f"run-{hostile}", environment=environment)))
+
+        assert hostile not in html
+        assert "&lt;script&gt;" in html
+        assert "alert(&#x27;xss&#x27;)" in html or "alert('xss')" not in html
+
+    def test_an_unprofiled_run_is_labelled_and_fenced_off_from_throughput(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        assert "unprofiled" in html.lower()
+        assert "throughput" in html.lower()
+
+    def test_a_profiled_run_says_its_numbers_are_diagnostic(self, make_run):
+        html = render_html(load_run(make_run(environment=_with_extra(profiled=True))))
+
+        assert "profiled" in html.lower()
+        assert "SS-04" in html
+
+    def test_an_unknown_profiling_status_is_not_rendered_as_unprofiled(self, make_run):
+        extra = {k: v for k, v in GOOD_ENVIRONMENT["extra"].items() if k != "profiled"}
+
+        html = render_html(load_run(make_run(environment={**GOOD_ENVIRONMENT, "extra": extra})))
+
+        assert "profiling status was not recorded" in html.lower()
+
+    def test_recorded_statistics_are_shown_exactly_as_produced(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        for key, value in GOOD_SUMMARY.items():
+            assert key in html
+            assert repr(value) in html
+
+    def test_an_absent_summary_is_declared_absent_not_zeroed(self, make_run):
+        html = render_html(load_run(make_run(summary=None)))
+
+        assert "summary.json" in html
+        assert "not present" in html
+        assert "median_step_ms" not in html
+        assert "0.0 ms" not in html
+
+    def test_the_provenance_block_is_rendered_in_full(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        for key in ("torch_version", "python_version", "machine", "cuda_available"):
+            assert key in html
+        for key in ("seed", "batch_size", "data_residency", "source"):
+            assert key in html
+
+    def test_every_step_row_is_rendered_when_it_fits(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        assert "2.3827712535858154" in html
+        assert "17.921874998137355" in html
+
+    def test_a_long_run_is_truncated_with_an_explicit_count(self, make_run):
+        rows = [f"{index},1.0,{index}.5,host,True" for index in range(5)]
+        run = load_run(make_run(steps_csv=_csv(*rows)))
+
+        html = render_html(run, max_rows=2)
+
+        assert "2 of 5" in html
+        assert STEPS_CSV in html
+        assert "4.5" not in html
+
+    def test_a_non_positive_row_cap_is_refused(self, make_run):
+        with pytest.raises(ReportError, match="max_rows"):
+            render_html(load_run(make_run()), max_rows=0)
+
+    def test_the_row_count_and_the_recorded_count_are_shown_side_by_side(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        assert "3" in html
+        assert "steps.csv" in html
+
+    def test_a_disagreement_between_artifacts_is_surfaced_not_reconciled(self, make_run):
+        run = load_run(make_run(summary={**GOOD_SUMMARY, "steps": 99.0}))
+
+        html = render_html(run)
+
+        assert "disagree" in html
+
+    def test_an_unknown_recorded_count_is_not_called_a_disagreement(self, make_run):
+        html = render_html(load_run(make_run(summary={})))
+
+        assert "disagree" not in html
+
+    def test_a_run_without_a_settings_block_still_renders(self, make_run):
+        environment = {key: value for key, value in GOOD_ENVIRONMENT.items() if key != "extra"}
+
+        html = render_html(load_run(make_run(environment=environment)))
+
+        assert "Run settings" not in html
+        assert "Provenance" in html
+
+    def test_the_guardrails_are_stated_in_the_report_itself(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        assert "do not sum" in html.lower()
+        assert "not_observed" in html
+
+    def test_the_step_table_mirrors_the_csv_spelling_of_the_sync_policy(self, make_run):
+        html = render_html(load_run(make_run()))
+
+        assert "<td>True</td>" in html
+
+    def test_a_run_rebuilt_from_json_without_a_file_list_still_renders(self, make_run):
+        payload = load_run(make_run()).to_dict()
+        payload["artifact_names"] = []
+
+        html = render_html(RunArtifacts.from_dict(payload))
+
+        assert "Files in the run directory" not in html
+        assert "Per-step records" in html
+
+    def test_rendering_is_deterministic(self, make_run):
+        run = load_run(make_run())
+
+        assert render_html(run, generated_at="2026-10-23T00:00:00Z") == render_html(
+            run, generated_at="2026-10-23T00:00:00Z"
+        )
+
+    def test_the_generation_timestamp_is_shown_when_given(self, make_run):
+        html = render_html(load_run(make_run()), generated_at="2026-10-23T00:00:00Z")
+
+        assert "2026-10-23T00:00:00Z" in html
+
+    def test_an_escaped_timestamp_cannot_inject_markup(self, make_run):
+        html = render_html(load_run(make_run()), generated_at="<b>now</b>")
+
+        assert "<b>now</b>" not in html
+
+
+class TestJsonAndCsvViews:
+    def test_the_json_view_round_trips_back_into_a_run(self, make_run):
+        run = load_run(make_run())
+
+        restored = RunArtifacts.from_dict(json.loads(render_json(run)))
+
+        assert restored == run
+
+    def test_the_json_view_keeps_absent_measurements_null(self, make_run):
+        payload = json.loads(render_json(load_run(make_run(summary=None))))
+
+        assert payload["summary"] is None
+
+    def test_the_json_view_carries_the_availability_statuses(self, make_run):
+        payload = json.loads(render_json(load_run(make_run())))
+
+        states = {entry["field"]: entry["state"] for entry in payload["availability"]}
+
+        assert states["step_time_ms"] == RECORDED
+        assert states["data_wait_ms"] == NOT_RECORDED
+
+    def test_the_csv_view_round_trips_the_producer_file(self, make_run):
+        assert render_steps_csv(load_run(make_run())) == GOOD_STEPS_CSV
+
+    def test_the_csv_renderer_refuses_an_empty_run(self):
+        from shardscope.artifacts import steps_csv_text
+        from shardscope.errors import ArtifactError
+
+        with pytest.raises(ArtifactError, match="no rows"):
+            steps_csv_text(())
+
+
+class TestWriteReport:
+    @pytest.mark.parametrize("fmt", REPORT_FORMATS)
+    def test_writes_each_format_and_creates_parent_directories(self, make_run, tmp_path, fmt):
+        out = tmp_path / "reports" / f"baseline.{fmt}"
+
+        written = write_report(load_run(make_run()), out, fmt=fmt)
+
+        assert written == out
+        assert out.read_text().strip() != ""
+
+    def test_a_failed_render_leaves_no_partial_file(self, make_run, tmp_path):
+        out = tmp_path / "reports" / "baseline.html"
+
+        with pytest.raises(ReportError):
+            write_report(load_run(make_run()), out, fmt="html", max_rows=0)
+
+        assert not out.exists()
+        assert not out.parent.exists()
+
+    def test_an_unknown_format_is_refused(self, make_run, tmp_path):
+        with pytest.raises(ReportError, match="format"):
+            write_report(load_run(make_run()), tmp_path / "r.html", fmt="pdf")
+
+    def test_render_dispatches_on_format(self, make_run):
+        run = load_run(make_run())
+
+        assert render(run, "csv") == render_steps_csv(run)
+        assert render(run, "json") == render_json(run)
+
+    @pytest.mark.parametrize(
+        ("name", "fmt"),
+        [("r.html", "html"), ("r.htm", "html"), ("r.json", "json"), ("r.csv", "csv")],
+    )
+    def test_a_format_can_be_inferred_from_the_output_suffix(self, tmp_path, name, fmt):
+        assert format_for_path(tmp_path / name) == fmt
+
+    def test_an_unknown_suffix_is_refused_with_the_choices(self, tmp_path):
+        with pytest.raises(ReportError) as excinfo:
+            format_for_path(tmp_path / "report.pdf")
+
+        assert "--format" in str(excinfo.value)
+        for fmt in REPORT_FORMATS:
+            assert fmt in str(excinfo.value)
+
+    def test_a_report_error_is_a_shardscope_error(self, make_run, tmp_path):
+        with pytest.raises(ShardScopeError):
+            write_report(load_run(make_run()), tmp_path / "r.html", fmt="pdf")

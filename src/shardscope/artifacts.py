@@ -28,6 +28,7 @@ Two rules the validation follows:
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -49,6 +50,7 @@ __all__ = [
     "load_run",
     "load_steps_csv",
     "looks_like_run",
+    "steps_csv_text",
     "write_steps_csv",
 ]
 
@@ -458,12 +460,29 @@ def _parse_bool(value: str, *, where: str, column: str) -> bool:
     raise ArtifactError(f"{where}: column {column!r} must be true or false, got {value!r}.")
 
 
-def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
-    """Write ``rows`` as a per-step CSV, byte-compatible with the producer.
+def steps_csv_text(rows: Sequence[StepRow]) -> str:
+    """Render ``rows`` as per-step CSV text, byte-compatible with the producer.
 
     Round-trips: a CSV written by ``examples/train_single.py``, loaded and
-    written again by this function is identical to the original.
+    rendered again by this function is identical to the original. The CSV
+    module does the quoting, so a value that ever grows a comma or a quote
+    is escaped by the same code that escapes it on the way in.
     """
+    if not rows:
+        raise ArtifactError(
+            "refusing to render a per-step CSV with no rows. An empty CSV would "
+            "read as a run that measured nothing."
+        )
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=list(STEP_COLUMNS), lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row.to_dict())
+    return buffer.getvalue()
+
+
+def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
+    """Write ``rows`` to ``path`` as a per-step CSV; see :func:`steps_csv_text`."""
     if not rows:
         raise ArtifactError(
             f"refusing to write a per-step CSV with no rows: {path}. "
@@ -471,11 +490,7 @@ def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
         )
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(STEP_COLUMNS), lineterminator="\n")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row.to_dict())
+    target.write_text(steps_csv_text(rows))
     return target
 
 

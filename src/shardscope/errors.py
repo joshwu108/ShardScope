@@ -8,7 +8,13 @@ hide real defects behind a tidy error message.
 
 from __future__ import annotations
 
-__all__ = ["ArtifactError", "BlockedOnDecisionError", "ConfigError", "ShardScopeError"]
+__all__ = [
+    "ArtifactError",
+    "BlockedOnDecisionError",
+    "ConfigError",
+    "ReportError",
+    "ShardScopeError",
+]
 
 
 class ShardScopeError(Exception):
@@ -30,6 +36,15 @@ class ArtifactError(ShardScopeError):
     The message must name the offending file -- and the row, key or column
     inside it -- because the usual cause is a hand-edited or half-written
     run directory, and "invalid artifact" alone does not say which one.
+    """
+
+
+class ReportError(ShardScopeError):
+    """A report cannot be rendered as asked for.
+
+    Covers an unknown output format and rendering options that would produce
+    a misleading document (for example a row cap of zero, which would render
+    a run as if it had measured nothing).
     """
 
 
