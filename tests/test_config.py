@@ -151,6 +151,28 @@ class TestActionableErrors:
         with pytest.raises(ConfigError, match="is a directory"):
             load_run_config(tmp_path)
 
+    def test_an_undecodable_file_is_rejected_by_name(self, tmp_path):
+        # A config is read the same way run artifacts are, so it must fail
+        # the same way: one actionable line naming the file and the byte,
+        # not a UnicodeDecodeError traceback out of pathlib.
+        target = tmp_path / "latin1.json"
+        target.write_bytes(b'{"_note": "caf\xe9", "steps": 3}')
+
+        with pytest.raises(ConfigError) as caught:
+            load_run_config(target)
+
+        message = str(caught.value)
+        assert "latin1.json" in message
+        assert "not valid UTF-8" in message
+
+    def test_a_config_with_non_ascii_text_loads(self, tmp_path):
+        # The other half of the same fix: a UTF-8 config must load whatever
+        # the machine's locale encoding happens to be.
+        target = tmp_path / "utf8.json"
+        target.write_bytes('{"_note": "caf\u00e9 \u2014 na\u00efve", "steps": 3}'.encode())
+
+        assert load_run_config(target).steps == 3
+
     def test_malformed_json_reports_the_parser_position(self, tmp_path):
         with pytest.raises(ConfigError) as caught:
             load_run_config(_write(tmp_path, '{"steps": 3,}'))

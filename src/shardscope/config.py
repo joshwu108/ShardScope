@@ -98,12 +98,16 @@ def load_run_config(path: str | Path) -> RunConfig:
     """Read and validate a JSON run config.
 
     Raises :class:`ConfigError` with an actionable message for a missing
-    file, malformed JSON, an unknown key, or a value of the wrong type or
-    out of range.
+    file, a file that is not valid UTF-8, malformed JSON, an unknown key, or
+    a value of the wrong type or out of range.
     """
     target = Path(path)
     try:
-        text = target.read_text()
+        # UTF-8 explicitly, and not the locale default: a config can carry a
+        # non-ASCII comment or path, and the same bytes must load the same
+        # way on every machine that replays the run. Matches how
+        # shardscope.artifacts reads a run's files.
+        text = target.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise ConfigError(
             f"no such config file: {target}. Write a JSON object with any of: "
@@ -111,6 +115,11 @@ def load_run_config(path: str | Path) -> RunConfig:
         ) from exc
     except IsADirectoryError as exc:
         raise ConfigError(f"{target} is a directory, not a config file.") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"{target} is not valid UTF-8 ({exc.reason} at byte {exc.start}). "
+            "Config files are read as UTF-8; re-save the file in that encoding."
+        ) from exc
     except OSError as exc:  # pragma: no cover - permissions/IO specific
         raise ConfigError(f"cannot read config file {target}: {exc}") from exc
 
