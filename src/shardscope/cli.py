@@ -285,7 +285,14 @@ def _discard_further_stdout() -> None:
         fileno = sys.stdout.fileno()
     except (AttributeError, OSError, ValueError):
         return
-    os.dup2(os.open(os.devnull, os.O_WRONLY), fileno)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, fileno)
+    finally:
+        # dup2 duplicates the descriptor; the one os.open handed back is a
+        # second reference and has to be released. Harmless in a one-shot
+        # process, a leak per call in anything that calls main() twice.
+        os.close(devnull)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

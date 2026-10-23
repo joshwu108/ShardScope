@@ -324,11 +324,52 @@ class TestAClosedStdoutPipe:
         assert code == EXIT_BROKEN_PIPE
         assert sink.read_text() == ""
 
+    def test_the_redirect_does_not_leak_a_descriptor(self, make_run, tmp_path, monkeypatch):
+        # dup2 duplicates the descriptor, so the one os.open returned is a
+        # second reference. Harmless in a one-shot process, a leak per call
+        # in anything that calls main() more than once.
+        sink = tmp_path / "sink.txt"
+        handle = sink.open("w")
+        fileno = handle.fileno()
+
+        class BrokenButRealStdout:
+            def write(self, _text):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+
+            def fileno(self):
+                return fileno
+
+        run = make_run()
+        monkeypatch.setattr("sys.stdout", BrokenButRealStdout())
+
+        before = _open_descriptor_count()
+        for _ in range(3):
+            assert main(["report", "--run", str(run), "--format", "csv"]) == EXIT_BROKEN_PIPE
+        after = _open_descriptor_count()
+        handle.close()
+
+        assert after == before
+
     def test_the_code_is_distinct_from_a_user_error_and_from_success(self):
         # 0 success, 2 user error, 141 = 128 + SIGPIPE. Collapsing the third
         # into either of the first two would make a script unable to tell
         # "you typed a bad path" from "the reader hung up".
         assert EXIT_BROKEN_PIPE == 141
+
+
+def _open_descriptor_count() -> int:
+    """How many file descriptors this process holds open.
+
+    /proc/self/fd on Linux, /dev/fd on macOS; both are directories whose
+    entries are the open descriptors.
+    """
+    for path in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(path):
+            return len(os.listdir(path))
+    pytest.skip("no /proc/self/fd or /dev/fd on this platform")
 
 
 def test_version_is_reported(capsys):
