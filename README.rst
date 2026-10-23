@@ -33,15 +33,82 @@ waiting on. They do not produce partial output or empty run directories.
 
 ``shardscope --help`` lists the current state of every command.
 
-The training fixture
-====================
+Install
+=========
+
+Requires Python 3.10-3.12 -- the range PyTorch publishes wheels for, and the
+range CI tests (3.10 and 3.12 legs). On Apple silicon the interpreter must be
+``arm64``; x86_64 Python has no modern PyTorch wheel. Check with
+``python -c "import platform; print(platform.machine())"``.
 
 .. code-block:: console
 
-   $ python examples/train_single.py --steps 100 --device auto --out-dir runs/baseline
+   $ uv venv --python 3.12 .venv
+   $ source .venv/bin/activate
+   $ uv pip install -e ".[dev]"
 
-Two switches exist because they change what the number *means*, not just how
-fast it is:
+``pip`` works identically if you prefer it: ``python -m venv .venv`` then
+``pip install -e ".[dev]"``. The ``dev`` extra adds pytest, pytest-cov, ruff
+and docutils, which are what ``tools/dev.py`` needs; without it the test and
+lint gates cannot run.
+
+Verify the install -- both commands must agree on the version:
+
+.. code-block:: console
+
+   $ shardscope --version
+   shardscope 0.0.1
+   $ shardscope env
+   ShardScope environment
+     python          3.12.14
+     platform        macOS-27.0-arm64-arm-64bit
+     machine         arm64
+     torch           2.14.1
+     accelerator     mps
+     cuda            not available
+     cudnn           not available
+     nccl            not available
+     cuda devices    0
+     ddp capable     False
+     note            DDP/NCCL results must not be reported from this host.
+
+The values above are this machine's. ``ddp capable`` is the gate on any
+multi-GPU claim: if it says ``False``, no DDP or NCCL result may be reported
+from this host.
+
+``python tools/dev.py smoke`` checks the same thing and more, including that
+the console script on ``PATH`` and the package this interpreter imports are
+the same install.
+
+Quick start
+===========
+
+Record a run, then render it. These are two separate commands because a run
+is an artifact: it is produced once and read many times.
+
+.. code-block:: console
+
+   $ python examples/train_single.py --steps 100 --device auto --quiet --out-dir runs/baseline
+   device=mps residency=host synchronized=True seed=0
+   steps=100 median=1.511 ms p95=2.342 ms min=1.294 ms max=355.430 ms
+   wrote runs/baseline/steps.csv, environment.json, summary.json
+   $ shardscope report --run runs/baseline --out reports/baseline.html
+   wrote reports/baseline.html (html) from runs/baseline
+
+Those step times are one machine's, from one timed fixture run. They are not
+throughput results and not a benchmark -- see `Honest-measurement rules`_.
+Drop ``--quiet`` to see a line per step.
+
+Every command exits ``0`` on success, ``2`` for a mistake you can fix (a bad
+path, an invalid config, an unimplemented command), and ``141`` when the
+reader of its stdout pipe hangs up. A non-zero exit never leaves a partial
+run directory or a half-written report behind.
+
+The training fixture
+====================
+
+``examples/train_single.py --help`` lists every knob. Two switches exist
+because they change what the number *means*, not just how fast it is:
 
 ``--no-sync``
   Stops synchronizing the device around each step. Timings then measure
@@ -172,18 +239,82 @@ These are project invariants, not style preferences:
 * Multi-GPU and NCCL results are reported only from hosts that actually ran
   them. ``shardscope env`` says whether this host qualifies.
 
-Install
-=========
+Limitations
+===========
 
-Requires Python 3.10-3.12 (PyTorch wheel coverage). On Apple silicon, make
-sure the interpreter is ``arm64``; x86_64 Python has no modern PyTorch wheel.
+What this version cannot do, and why. None of these are oversights: each one
+waits on a measurement decision that has to be made deliberately, and
+guessing would produce a number nobody could defend.
 
-.. code-block:: console
+* **No profiler capture.** ``shardscope profile`` is declared but refuses to
+  run. The capture schedule, the activity set, and the ``record_function``
+  marker names every later rule keys off are unsettled, and they determine
+  what a trace *means*.
+* **No profiled per-step fields.** ``data_wait_ms``, ``h2d_copy_ms`` and the
+  rest have no reader and no renderer. A per-step CSV that carries them is
+  refused, not partially loaded.
+* **No bottleneck diagnosis, thresholds or confidence labels.** A report
+  states that a diagnosis is absent and names the decision it waits on.
+* **No throughput benchmark or before/after comparison.** ``bench`` and
+  ``compare`` refuse to run: without an agreed warmup count, repeat count
+  and variance test, a percentage change would be undefendable.
+* **No statistics computed by the report.** It prints what ``summary.json``
+  recorded and derives nothing, not even a mean.
+* **Single-device only.** ``examples/train_ddp.py`` is a skeleton. Nothing
+  here has produced a multi-GPU or NCCL measurement, and ``shardscope env``
+  reports whether the host could.
+* **No multi-run or sweep reporting.** ``report`` takes one run directory.
+* **Reports are local artifacts.** ``runs/`` and ``reports/`` are
+  git-ignored: both embed the producing machine's paths, device names and
+  library versions.
 
-   $ uv venv --python 3.12 .venv
-   $ source .venv/bin/activate
-   $ uv pip install -e ".[dev]"
-   $ shardscope env
+Troubleshooting
+===============
+
+``shardscope: command not found``
+  The package is not installed into the active interpreter, or the virtual
+  environment is not activated. Re-run ``uv pip install -e ".[dev]"`` after
+  ``source .venv/bin/activate``.
+
+``shardscope --version`` disagrees with ``python -c "import shardscope"``
+  Another ``shardscope`` is earlier on ``PATH``, or the editable install is
+  stale. ``python tools/dev.py smoke`` reports this explicitly; fix it by
+  reinstalling and checking ``which -a shardscope``.
+
+``No module named torch`` or a resolution failure during install
+  Check the interpreter is 3.10-3.12 and, on Apple silicon, ``arm64``.
+  PyTorch publishes no wheel outside that range.
+
+``error: 'profile' is not implemented yet ...``
+  Expected. The message names the decision the command waits on. Same for
+  ``bench`` and ``compare``.
+
+``error: <dir> has no steps.csv, so it is not a run directory``
+  ``--run`` wants one run directory, not the parent that holds several. The
+  message lists the run directories it found underneath.
+
+``error: <file>: unexpected column(s): data_wait_ms``
+  The CSV uses the profiled schema, which has no reader yet. The message
+  names the open decisions. The column is not dropped, because a silently
+  narrowed file would produce a report describing a run that did not happen.
+
+``error: --out-dir <path> exists and is not a directory``
+  Raised before the first training step, so nothing is lost. Point
+  ``--out-dir`` at a new or existing directory.
+
+``error: cannot tell the report format from 'x.pdf'``
+  Use an ``.html``, ``.htm``, ``.json`` or ``.csv`` suffix, or pass
+  ``--format`` explicitly. PDF is not a supported format.
+
+Exit code 141 from ``shardscope report ... | head``
+  Not an error: 128 + SIGPIPE, meaning the reader stopped reading. Nothing
+  is printed to stderr. Use ``--out FILE`` if you want the whole report.
+
+A test is skipped rather than run
+  Tests needing hardware this machine lacks are marked ``gpu`` or
+  ``distributed`` and skip rather than fake a result. ``shardscope env``
+  says what the host has. The integration tests skip if the console script
+  is not installed.
 
 Development
 ===========
@@ -201,10 +332,17 @@ commands ran.
    $ python tools/dev.py format     # ruff format (rewrites files)
    $ python tools/dev.py ci         # the full CI sequence, in order
 
-``ci`` runs lint, format check, tests with the coverage gate, the commit-skill
-bootstrap reproducibility check, the git ignore-policy assertions, and a
-smoke check that runs the installed CLI, the training fixture, and the
-fixture-run-to-HTML-report path end to end.
+``ci`` runs, in order:
+``lint``, ``format-check``, ``cov`` (pytest plus the 80% coverage gate),
+``readme-check`` (this file parses with no docutils warnings), the
+commit-skill bootstrap reproducibility check, the git ignore-policy
+assertions, and ``smoke``.
+
+``smoke`` is the end-to-end gate: it checks the console script's version
+against the installed distribution, runs ``shardscope env``, runs the
+training fixture with and without ``--config``, and renders a real recorded
+run to HTML. ``tests/test_integration.py`` covers the same path as spawned
+processes and asserts on the output rather than only the exit codes.
 
 Tests that need hardware this machine lacks are marked ``gpu`` or
 ``distributed`` and are skipped rather than faked.
@@ -225,6 +363,16 @@ cloning, regenerate the git-ignored agent commit skill:
 re-reads the staged set, and refuses Markdown, planning documents, trace
 exports, and unreviewed GPU-path changes. It never pushes, merges, rebases,
 amends, or force-pushes.
+
+Two things that look like failures and are not:
+
+* ``bootstrap_commit_skill.py`` exits ``3`` when the reference committing
+  convention named in the PRD is absent from this machine. The skill is
+  still written, carrying a banner that says it was not reconciled. CI
+  treats ``3`` as the expected state rather than papering over it.
+* ``--authorize`` refuses to touch an existing authorization file, and the
+  template it creates has ``authorized: false``. Enabling automated commits
+  is a hand edit by the repository owner, never an agent's own decision.
 
 Repository layout
 =================
