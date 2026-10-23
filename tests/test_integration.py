@@ -35,6 +35,7 @@ from shardscope.artifacts import RunArtifacts
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SINGLE = REPO_ROOT / "examples" / "train_single.py"
+BENCHMARKS = REPO_ROOT / "benchmarks"
 
 #: The installed console script, or None when the package is not installed.
 #: Resolved once: a skip must say "not installed", not fail as "not found".
@@ -257,6 +258,34 @@ class TestReportProcess:
 
         assert process.wait() == 141
         assert stderr == ""
+
+
+class TestUnimplementedScriptsRefuseCleanly:
+    """A stub that waits on a decision must not look like a crash.
+
+    These scripts are runnable, so someone will run them. Exiting 1 with a
+    ``NotImplementedError`` traceback reads as a broken harness; exiting 2
+    with one line naming the open decision reads as what it is.
+    """
+
+    @pytest.mark.parametrize("script", ["run_baseline.py", "compare.py"])
+    def test_they_exit_two_naming_gate_7_1(self, script):
+        completed = _run([sys.executable, str(BENCHMARKS / script)])
+
+        assert completed.returncode == 2
+        assert completed.stdout == ""
+        assert "Traceback" not in completed.stderr
+        assert len(completed.stderr.strip().splitlines()) == 1
+        assert "GATE 7.1" in completed.stderr
+        assert "not implemented" in completed.stderr
+
+    def test_both_name_the_same_blocker(self):
+        # One methodology decision blocks both. Two spellings of it would
+        # drift, and a reader would not know whether that mattered.
+        first = _run([sys.executable, str(BENCHMARKS / "run_baseline.py")]).stderr
+        second = _run([sys.executable, str(BENCHMARKS / "compare.py")]).stderr
+
+        assert first.split("Blocked on:")[1] == second.split("Blocked on:")[1]
 
 
 class TestPendingCommandsRefuseCleanly:
