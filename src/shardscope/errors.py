@@ -8,7 +8,7 @@ hide real defects behind a tidy error message.
 
 from __future__ import annotations
 
-__all__ = ["BlockedOnDecisionError", "ConfigError", "ShardScopeError"]
+__all__ = ["ArtifactError", "BlockedOnDecisionError", "ConfigError", "ShardScopeError"]
 
 
 class ShardScopeError(Exception):
@@ -21,6 +21,16 @@ class ShardScopeError(Exception):
 
 class ConfigError(ShardScopeError):
     """A run configuration file is missing, malformed, or out of range."""
+
+
+class ArtifactError(ShardScopeError):
+    """A run artifact is missing, unreadable, or does not match its schema.
+
+    Raised while discovering, loading or validating the files a run writes.
+    The message must name the offending file -- and the row, key or column
+    inside it -- because the usual cause is a hand-edited or half-written
+    run directory, and "invalid artifact" alone does not say which one.
+    """
 
 
 class BlockedOnDecisionError(ShardScopeError):
