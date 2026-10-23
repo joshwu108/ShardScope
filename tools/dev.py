@@ -257,12 +257,12 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "format-check", "ruff format --check", argv=(*PY, "-m", "ruff", "format", "--check", ".")
     ),
+    Check("readme-check", "README.rst parses with no docutils warnings", run=check_readme),
     Check(
         "cov",
         "pytest with the 80% coverage gate",
         argv=(*PY, "-m", "pytest", "-q", "--cov", "--cov-report=term-missing"),
     ),
-    Check("readme-check", "README.rst parses with no docutils warnings", run=check_readme),
     Check("bootstrap-check", "commit skill regenerates from tracked sources", run=check_bootstrap),
     Check("ignore-policy", "Markdown/planning/secrets stay out of git", run=check_ignore_policy),
     Check("smoke", "installed CLI, its version, and the report path run", run=check_smoke),

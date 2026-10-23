@@ -9,6 +9,7 @@ the parity test fails rather than the gate quietly going missing.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +78,15 @@ class TestCiParity:
     @pytest.mark.parametrize("name", dev.CI_SEQUENCE)
     def test_the_workflow_invokes_every_ci_check_through_dev_py(self, name):
         assert f"python tools/dev.py {name}" in WORKFLOW.read_text()
+
+    def test_the_workflow_runs_the_gates_in_the_declared_order(self):
+        # dev.py calls CI_SEQUENCE "the exact sequence ci.yml runs, in
+        # order". Presence alone would let the order drift, and order is
+        # load-bearing: lint and format run before the slow test gate so a
+        # typo fails in seconds.
+        invoked = re.findall(r"python tools/dev\.py (\S+)", WORKFLOW.read_text())
+
+        assert tuple(invoked) == dev.CI_SEQUENCE
 
     def test_the_workflow_does_not_reimplement_a_gate_inline(self):
         # Re-spelling a gate in YAML is how CI and local checks drift apart.
