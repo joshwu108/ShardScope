@@ -5,17 +5,23 @@ and throughput (unprofiled) benchmarks are different commands, and their
 numbers are never presented as interchangeable.
 
     shardscope env                 # reproducibility snapshot (implemented)
+    shardscope report ...          # render HTML/JSON/CSV from a run (implemented)
     shardscope profile ...         # bounded profiled diagnostic run (Week 2-3)
-    shardscope report ...          # render CSV/JSON/HTML from a run (Week 3)
     shardscope bench ...           # warm, unprofiled throughput run (Week 3-7)
     shardscope compare ...         # before/after with variance (Week 7)
 
-Everything except ``env`` is declared but unimplemented. The argument names
-come from PRD v2.0 section 11, so ``--help`` documents the agreed interface
-target; invoking one exits non-zero and names the decision it waits on,
-rather than pretending to work. Memory Lab commands (``memory-sweep``,
-``memory-report``) are deliberately absent: PRD v2.0 section 10 gates that
-whole block on a Week 7 review that has not happened.
+``report`` renders the artifacts a run already wrote -- the per-step CSV,
+the provenance dump and the recorded statistics -- and states, field by
+field, what the run does *not* contain and why. It adds no measurement: the
+profiled per-step schema is GATE 3.1/3.2 and has no reader yet, so a CSV
+carrying those columns is refused rather than partially rendered.
+
+``profile``, ``bench`` and ``compare`` are declared but unimplemented. The
+argument names come from PRD v2.0 section 11, so ``--help`` documents the
+agreed interface target; invoking one exits non-zero and names the decision
+it waits on, rather than pretending to work. Memory Lab commands
+(``memory-sweep``, ``memory-report``) are deliberately absent: PRD v2.0
+section 10 gates that whole block on a Week 7 review that has not happened.
 """
 
 from __future__ import annotations
@@ -24,10 +30,20 @@ import argparse
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
 from shardscope import __version__
+from shardscope.artifacts import load_run
 from shardscope.env import capture_environment
 from shardscope.errors import BlockedOnDecisionError, ShardScopeError
+from shardscope.report import (
+    DEFAULT_MAX_ROWS,
+    REPORT_FORMATS,
+    format_for_path,
+    render,
+    write_report,
+)
 
 
 @dataclass(frozen=True)
@@ -87,21 +103,6 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
         ),
     ),
     PendingCommand(
-        name="report",
-        week="3",
-        summary="render CSV/JSON/HTML from a recorded run",
-        blocked_on=(
-            "the per-step row schema in src/shardscope/parse.py -- which fields are "
-            "measured directly versus derived and how a derived field carries its "
-            "uncertainty (GATE 3.1), and what data_wait_ms means operationally "
-            "(GATE 3.2)"
-        ),
-        options=(
-            Option("--run", "DIR", "run directory produced by 'shardscope profile'"),
-            Option("--out", "FILE", "report file to write"),
-        ),
-    ),
-    PendingCommand(
         name="bench",
         week="3-7",
         summary="warm, never-profiled throughput run",
@@ -154,6 +155,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
 
+    report_cmd = sub.add_parser(
+        "report",
+        help="render a recorded run as HTML, JSON or CSV",
+        description=(
+            "Render the artifacts a run directory already contains. Shows the "
+            "recorded provenance, statistics and per-step rows, and states which "
+            "PRD v2.0 section 5 report fields the run does not contain, with the "
+            "reason for each. Computes no new measurement."
+        ),
+    )
+    report_cmd.add_argument(
+        "--run",
+        metavar="DIR",
+        type=Path,
+        required=True,
+        help="run directory holding steps.csv and environment.json",
+    )
+    report_cmd.add_argument(
+        "--out",
+        metavar="FILE",
+        type=Path,
+        default=None,
+        help="report file to write; without it the report goes to stdout",
+    )
+    report_cmd.add_argument(
+        "--format",
+        choices=REPORT_FORMATS,
+        default=None,
+        help="output format (default: inferred from --out, else html)",
+    )
+    report_cmd.add_argument(
+        "--max-rows",
+        metavar="N",
+        type=int,
+        default=DEFAULT_MAX_ROWS,
+        help=(
+            f"per-step rows to show inline (default {DEFAULT_MAX_ROWS}); a truncated "
+            "table says how many rows it is hiding and where the rest are"
+        ),
+    )
+
     for command in PENDING_COMMANDS:
         # Options are declared but optional: the command cannot run either
         # way, so demanding its arguments would only obscure the real reason
@@ -198,7 +240,28 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(env.to_json() if args.format == "json" else _render_env_text())
         return 0
 
+    if args.command == "report":
+        return _run_report(args)
+
     raise BlockedOnDecisionError(_PENDING_BY_NAME[args.command].message())
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    """Render one recorded run. Nothing is written unless rendering succeeds."""
+    run = load_run(args.run)
+    fmt = args.format or (format_for_path(args.out) if args.out is not None else "html")
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    if args.out is None:
+        # No trailing newline of our own: every renderer already ends in one.
+        sys.stdout.write(render(run, fmt, generated_at=generated_at, max_rows=args.max_rows))
+        return 0
+
+    written = write_report(
+        run, args.out, fmt=fmt, generated_at=generated_at, max_rows=args.max_rows
+    )
+    print(f"wrote {written} ({fmt}) from {run.path}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

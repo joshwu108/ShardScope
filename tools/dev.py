@@ -24,6 +24,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,7 @@ MUST_BE_IGNORED = {
     ".agents/skills/commit/SKILL.md": "the generated commit skill is regenerable, not tracked",
     ".shardscope-commit-auth.json": "local commit authorization is never shared",
     "runs/baseline/steps.csv": "run artifacts are machine-specific and regenerable",
+    "reports/baseline.html": "a rendered report embeds local paths and must be reviewed first",
 }
 
 #: Globs that must match nothing in the index.
@@ -143,34 +145,58 @@ def check_bootstrap() -> None:
 
 
 def check_smoke() -> None:
-    """The installed console script and the training fixture actually run."""
+    """The installed console script, the fixture, and the report path all run.
+
+    The last two commands are the end-to-end artifact path: a real run
+    writes its triple into a throwaway directory, and ``shardscope report``
+    renders it. A unit test can pass against a fixture that no producer
+    writes; this cannot.
+    """
     if shutil.which("shardscope") is None:
         raise CheckFailed(
             "the 'shardscope' console script is not on PATH. Install the package"
             ' first: uv pip install -e ".[dev]"'
         )
-    for argv in (
-        ["shardscope", "--version"],
-        ["shardscope", "env"],
-        [*PY, "examples/train_single.py", "--steps", "3", "--device", "cpu", "--quiet"],
-        # Also exercises --config and flag-over-config precedence.
-        [
-            *PY,
-            "examples/train_single.py",
-            "--config",
-            "examples/configs/cpu_baseline.json",
-            "--steps",
-            "3",
-            "--quiet",
-        ],
-    ):
-        print(f"$ {' '.join(argv)}", flush=True)
-        completed = _capture(argv)
-        if completed.returncode != 0:
-            raise CheckFailed(
-                f"smoke command failed ({completed.returncode}): {' '.join(argv)}\n"
-                f"{completed.stdout}{completed.stderr}".strip()
-            )
+    with tempfile.TemporaryDirectory(prefix="shardscope-smoke-") as scratch:
+        run_dir = Path(scratch) / "smoke-run"
+        report = Path(scratch) / "smoke-report.html"
+        for argv in (
+            ["shardscope", "--version"],
+            ["shardscope", "env"],
+            [*PY, "examples/train_single.py", "--steps", "3", "--device", "cpu", "--quiet"],
+            # Also exercises --config and flag-over-config precedence.
+            [
+                *PY,
+                "examples/train_single.py",
+                "--config",
+                "examples/configs/cpu_baseline.json",
+                "--steps",
+                "3",
+                "--quiet",
+            ],
+            [
+                *PY,
+                "examples/train_single.py",
+                "--steps",
+                "3",
+                "--device",
+                "cpu",
+                "--quiet",
+                "--out-dir",
+                str(run_dir),
+            ],
+            ["shardscope", "report", "--run", str(run_dir), "--out", str(report)],
+        ):
+            print(f"$ {' '.join(argv)}", flush=True)
+            completed = _capture(argv)
+            if completed.returncode != 0:
+                raise CheckFailed(
+                    f"smoke command failed ({completed.returncode}): {' '.join(argv)}\n"
+                    f"{completed.stdout}{completed.stderr}".strip()
+                )
+
+        if not report.is_file() or not report.read_text().startswith("<!DOCTYPE html>"):
+            raise CheckFailed(f"report smoke run did not produce an HTML document: {report}")
 
 
 CHECKS: tuple[Check, ...] = (

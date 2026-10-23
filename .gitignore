@@ -43,7 +43,11 @@ htmlcov/
 coverage.xml
 
 # Profiler and benchmark artifacts (large, machine-specific, regenerable)
+# reports/ stays local until reviewed: a rendered report embeds provenance,
+# file paths and operation names from the machine that produced it
+# (PRD v2.0 section 11).
 runs/
+reports/
 artifacts/
 *.pt.trace.json
 *.pt.trace.json.gz

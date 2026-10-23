@@ -23,12 +23,13 @@ Early. Implemented today:
   later profiling runs measure. Runs on CPU, MPS or CUDA; emits per-step
   CSV plus an environment and summary sidecar.
 * Run configuration files, validated before anything executes.
+* ``shardscope report`` -- renders a recorded run as HTML, JSON or CSV,
+  including a field-by-field statement of what the run does *not* contain.
 
-Declared but **not implemented**: ``shardscope profile``, ``report``,
-``bench`` and ``compare``. Their flags appear in ``--help`` so the target
-interface is visible, but invoking one exits non-zero and names the decision
-it is waiting on. They do not produce partial output or empty run
-directories.
+Declared but **not implemented**: ``shardscope profile``, ``bench`` and
+``compare``. Their flags appear in ``--help`` so the target interface is
+visible, but invoking one exits non-zero and names the decision it is
+waiting on. They do not produce partial output or empty run directories.
 
 ``shardscope --help`` lists the current state of every command.
 
@@ -95,6 +96,65 @@ Profiler settings -- the capture schedule, the activity set and the phase
 marker names -- are deliberately **not** configurable yet. Those define what
 a measurement means, and are not settled.
 
+Reporting a run
+===============
+
+A run directory is whatever ``--out-dir`` wrote: ``steps.csv``,
+``environment.json`` and ``summary.json``. ``shardscope report`` renders it.
+
+.. code-block:: console
+
+   $ python examples/train_single.py --steps 100 --device cpu --out-dir runs/baseline
+   $ shardscope report --run runs/baseline --out reports/baseline.html
+   wrote reports/baseline.html (html) from runs/baseline
+
+The format follows the output suffix (``.html``, ``.htm``, ``.json``,
+``.csv``) and ``--format`` overrides it. Without ``--out`` the report goes to
+stdout, which makes ``--format csv`` and ``--format json`` usable in a pipe.
+``--max-rows`` caps the inline per-step table; a truncated table says how
+many rows it is hiding and that the rest are in ``steps.csv``.
+
+The HTML report is one self-contained file: no scripts, no stylesheets, no
+network references. Everything interpolated into it -- provenance strings,
+file names, config paths -- is HTML-escaped, because a run can carry
+arbitrary text from the program that was profiled and a report is the
+artifact that gets shared.
+
+What the report will not do:
+
+* It computes nothing. Every number in it came from an artifact in the run
+  directory. ``summary.json`` is shown as produced; if it is absent, the
+  report says so instead of recomputing a replacement.
+* It never fills a gap with zero. Each core report field from the PRD gets
+  one of three states: *recorded*, *not recorded* (nothing captured it, and
+  where a decision is pending the text names the open GATE), or
+  ``not_observed`` (this run's own environment could not have produced it --
+  no CUDA device for kernel activity, fewer than two for collectives, no
+  per-step host-to-device copy under ``--data-residency device``).
+* It attaches no diagnosis, threshold or confidence label. Those are open
+  decisions, and a report that invented one would be putting words in the
+  author's mouth.
+* It does not reconcile artifacts that disagree. The per-step row count and
+  ``summary.json``'s ``steps`` are shown side by side, and a mismatch is
+  flagged rather than quietly resolved.
+
+A damaged or unsupported run is refused with one actionable line and exit
+code 2, and no partial report is written:
+
+.. code-block:: console
+
+   $ shardscope report --run runs/typo
+   error: no such run directory: runs/typo. A run directory holds steps.csv
+   and environment.json (see examples/train_single.py --out-dir).
+   $ shardscope report --run runs
+   error: runs has no steps.csv, so it is not a run directory. It does contain
+   2 run directories: w1-cpu, w1-mps.
+
+A per-step CSV carrying columns this version does not know -- the profiled
+schema, for instance -- is refused rather than loaded with those columns
+dropped, because a silently narrowed file would produce a report describing a
+run that did not happen.
+
 Honest-measurement rules
 ========================
 
@@ -142,7 +202,8 @@ commands ran.
 
 ``ci`` runs lint, format check, tests with the coverage gate, the commit-skill
 bootstrap reproducibility check, the git ignore-policy assertions, and a
-CLI/fixture smoke check.
+smoke check that runs the installed CLI, the training fixture, and the
+fixture-run-to-HTML-report path end to end.
 
 Tests that need hardware this machine lacks are marked ``gpu`` or
 ``distributed`` and are skipped rather than faked.
@@ -169,7 +230,8 @@ Repository layout
 
 .. code-block:: text
 
-   src/shardscope/     cli, env, config, errors; capture/parse/rules/report
+   src/shardscope/     cli, env, config, errors, artifacts, availability,
+                       report/html_report; capture/parse/rules skeletons
    examples/           train_single.py, train_ddp.py
    benchmarks/         unprofiled throughput harness and comparisons
    tests/              unit and integration tests
