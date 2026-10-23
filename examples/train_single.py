@@ -3,11 +3,11 @@
 Requirement SS-01: a tiny, reproducible PyTorch training example with
 fixed-seed synthetic input.
 
-Authorship: written by the AI agent at the student's request, under PRD
-section 12.4 ("project scaffolding", "CPU fixtures", "PyTorch example
-scaffolding"). It contains no custom kernels and no device hot-path
-optimization; those remain student-owned. Nothing here may be presented as
-the student's own GPU work.
+Authorship: written by the AI agent at the student's request, under the
+"Project plumbing" row of PRD v2.0 section 13 ("Project scaffold, examples,
+CLI, parsers, reports, fixtures"). It contains no custom kernels and no
+device hot-path optimization; those remain student-owned. Nothing here may be
+presented as the student's own GPU work.
 
 Design notes that later weeks depend on:
 
@@ -22,8 +22,8 @@ Design notes that later weeks depend on:
   after the step timer stops. Otherwise ``--no-sync`` would secretly
   synchronize and measure the same thing as ``--sync``.
 
-Open approval gates (PRD section 12.1) -- current values are defaults, not
-decisions:
+Open approval gates (PRD v2.0 section 13 approval gate) -- current values are
+defaults, not decisions:
 
 * GATE 1.1 model shape and batch size: the defaults below (a 9,098-parameter
   CNN, batch 64) are chosen to keep steps and traces small. Replace them if
@@ -93,8 +93,9 @@ def make_synthetic_dataset(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(images, labels)`` drawn from a seed-local generator.
 
-    The data is meaningless by design (PRD section 9: no accuracy score is
-    needed); only its shape, dtype and reproducibility matter.
+    The data is meaningless by design (PRD v2.0 section 5, SS-01 asks for
+    seeded synthetic input and no accuracy score); only its shape, dtype and
+    reproducibility matter.
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples}")

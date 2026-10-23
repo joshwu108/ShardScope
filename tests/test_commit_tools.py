@@ -1,4 +1,4 @@
-"""Tests for the tracked commit tooling (PRD section 12.2 / 12.3).
+"""Tests for the tracked commit tooling (PRD v2.0 sections 13.1 / 13.2).
 
 These guard the safety rules, which matter more than the convenience: the
 deny list must beat the allow list, Markdown and planning documents must

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe, auditable local commits for ShardScope (PRD section 12.2).
+"""Safe, auditable local commits for ShardScope (PRD v2.0 section 13.1).
 
 What this script will do:
   * confirm the repository's local git identity matches the identity the
@@ -38,7 +38,7 @@ from pathlib import Path
 AUTH_FILE = ".shardscope-commit-auth.json"
 
 #: Paths that must never reach a commit, whatever the allowlist says.
-#: Mirrors the .gitignore policy in PRD section 12.3.
+#: Mirrors the .gitignore policy in PRD v2.0 section 13.2.
 DENY_PATTERNS = (
     "*.md",
     "*.markdown",

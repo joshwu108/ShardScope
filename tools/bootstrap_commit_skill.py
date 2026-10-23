@@ -2,8 +2,8 @@
 """Regenerate the git-ignored local commit skill from tracked sources.
 
 The commit skill lives at ``.agents/skills/commit/SKILL.md``, which the
-project's .gitignore excludes (PRD section 12.3 ignores all Markdown). This
-script is the tracked, non-Markdown path that recreates it on a fresh
+project's .gitignore excludes (PRD v2.0 section 13.2 ignores all Markdown).
+This script is the tracked, non-Markdown path that recreates it on a fresh
 checkout from ``tools/commit_skill_template.txt``.
 
 It also reports -- rather than silently assumes -- whether the reference
@@ -25,7 +25,7 @@ from pathlib import Path
 TEMPLATE = Path("tools/commit_skill_template.txt")
 TARGET = Path(".agents/skills/commit/SKILL.md")
 
-#: PRD section 12.2 names this as the convention to derive from. Candidate
+#: PRD v2.0 section 13.1 names this as the convention to derive from. Candidate
 #: locations are checked read-only; nothing is ever copied out of them.
 REFERENCE_CANDIDATES = (
     Path.home() / "beacon-climb" / ".agents" / "skills" / "commit" / "SKILL.md",
@@ -37,7 +37,7 @@ REFERENCE_CANDIDATES = (
 MISSING_REFERENCE = (
     "NOT FOUND on this machine. ~/beacon-climb was absent when this skill was "
     "generated, so the workflow below was derived from the ShardScope PRD "
-    "(section 12.2) alone and has NOT been reconciled with the reference "
+    "(section 13.1) alone and has NOT been reconciled with the reference "
     "convention. Re-run this bootstrap once ~/beacon-climb is available."
 )
 

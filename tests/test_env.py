@@ -66,6 +66,6 @@ def test_to_json_round_trips():
 
 
 def test_not_observed_is_a_sentinel_string_not_a_number():
-    # PRD section 6 guardrail: unobservable quantities must never surface as 0.
+    # PRD v2.0 section 8 guardrail: unobservable quantities never surface as 0.
     assert isinstance(NOT_OBSERVED, str)
     assert NOT_OBSERVED != 0

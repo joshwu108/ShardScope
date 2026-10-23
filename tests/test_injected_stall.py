@@ -1,7 +1,8 @@
 """Injected data-loader stall detection -- Week 4 (requirement SS-05).
 
-Acceptance test from PRD section 6: a documented artificial ~50-100 ms
-loader delay must produce a slow-input warning backed by a trace difference.
+Acceptance test from PRD v2.0 section 8 ("MVP acceptance"): a documented
+artificial ~50-100 ms loader delay must raise an evidence-linked input-wait
+diagnostic backed by a trace difference.
 """
 
 import pytest

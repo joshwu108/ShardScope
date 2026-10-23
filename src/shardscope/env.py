@@ -1,8 +1,9 @@
 """Reproducibility metadata for a ShardScope run.
 
-Requirement SS-? / section 6 "Repeatability": every benchmark or diagnostic
-artifact must record enough environment detail that another person can judge
-whether two runs are comparable.
+PRD v2.0 section 4 ("Run contract"): every benchmark or diagnostic artifact
+must record enough environment detail that another person can judge whether
+two runs are comparable. Section 9 ("Statistical trust") depends on the same
+snapshot travelling with every measurement.
 
 This module is deliberately dependency-light and never imports CUDA eagerly,
 so it works on a CPU-only laptop and inside CI.
@@ -17,7 +18,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 #: Value used anywhere a quantity could not be observed in this environment.
-#: Never substitute 0 or a guess -- see PRD section 6 "Guardrail".
+#: Never substitute 0 or a guess -- see PRD v2.0 section 8 "Guardrails".
 NOT_OBSERVED = "not_observed"
 
 
@@ -61,7 +62,7 @@ class RunEnvironment:
         """True only when a real multi-CUDA-device DDP run is possible here.
 
         DDP/NCCL claims in any report must be gated on this returning True;
-        PRD section 8 forbids reporting distributed results that were not run.
+        PRD v2.0 section 8 forbids reporting distributed results that were not run.
         """
         return self.cuda_available and self.device_count >= 2
 

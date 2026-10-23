@@ -1,5 +1,6 @@
 """Compare two unprofiled benchmark results and report whether the delta
-exceeds observed run-to-run variance (PRD section 7, regression tracking).
+exceeds observed run-to-run variance (PRD v2.0 section 9, "Statistical
+trust").
 
 Status: STUB (Week 7 deliverable).
 

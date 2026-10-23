@@ -71,8 +71,8 @@ def test_model_maps_a_batch_to_class_logits():
 
 
 def test_model_is_small_enough_to_profile_quickly():
-    # PRD section 9: "a very small neural net". Keeping this bounded keeps
-    # trace files and step times in the range the profiler targets.
+    # PRD v2.0 section 5, SS-01: a *small* training example. Keeping this
+    # bounded keeps trace files and step times in the profiler's range.
     model = train_single.build_model(seed=0)
     parameters = sum(p.numel() for p in model.parameters())
 

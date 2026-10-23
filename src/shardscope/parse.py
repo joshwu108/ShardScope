@@ -5,7 +5,8 @@ Status: SKELETON (Week 3 deliverable).
 Scope, once the capture contract is approved:
   * read exported Chrome/Kineto traces and per-step records;
   * normalize events onto (rank, step_index) keys -- never onto raw
-    cross-host wall-clock timestamps (PRD section 10, "Clock alignment");
+    cross-host wall-clock timestamps (PRD v2.0 section 8: analysis must not
+    imply precise cross-host clock synchronization);
   * emit tidy per-step rows for CSV/JSON export.
 
 AWAITING STUDENT DECISION: the per-step row schema (which of step_time_ms,
