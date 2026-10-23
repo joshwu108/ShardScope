@@ -132,14 +132,32 @@ class TestEnvCommand:
         assert isinstance(payload["device_names"], list)
 
     @requires_install
-    def test_it_never_claims_more_devices_than_it_names(self):
-        # The one honesty invariant of the snapshot: a device count that
-        # outruns the inventory is how a DDP result gets attributed to a
-        # host that has one GPU.
+    def test_the_device_count_and_the_inventory_always_agree(self):
+        # The honesty invariant of the snapshot, and it holds on every host:
+        # a count that outruns the named inventory is how a DDP result gets
+        # attributed to a machine with one GPU. Asserted unconditionally,
+        # because a check that only runs on CUDA hosts is no check here.
         payload = json.loads(_cli("env", "--format", "json").stdout)
 
-        if payload["device_names"]:
-            assert len(payload["device_names"]) == payload["device_count"]
+        assert len(payload["device_names"]) == payload["device_count"]
+        if not payload["cuda_available"]:
+            assert payload["device_count"] == 0
+            # No CUDA also means no CUDA-only version string invented.
+            assert payload["cudnn_version"] is None
+            assert payload["nccl_version"] is None
+
+    @requires_install
+    def test_ddp_capability_follows_the_device_count(self):
+        # One rule for "can this host run DDP", shared by the snapshot and
+        # any report that reads a recorded environment.
+        from shardscope.env import distributed_capable
+
+        payload = json.loads(_cli("env", "--format", "json").stdout)
+        expected = distributed_capable(
+            cuda_available=payload["cuda_available"], device_count=payload["device_count"]
+        )
+
+        assert ("ddp capable     True" in _cli("env").stdout) is expected
 
 
 class TestTrainingFixtureProcess:
