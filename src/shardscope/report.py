@@ -120,6 +120,11 @@ def write_report(
     """
     text = render(run, fmt, generated_at=generated_at, max_rows=max_rows)
     target = Path(out)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    except OSError as exc:
+        # A directory in the way, or a file where a directory belongs, is the
+        # user's mistake and deserves a sentence rather than a traceback.
+        raise ReportError(f"cannot write the report to {target}: {exc.strerror or exc}.") from exc
     return target

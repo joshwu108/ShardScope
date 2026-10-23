@@ -405,6 +405,22 @@ class TestWriteReport:
         assert not out.exists()
         assert not out.parent.exists()
 
+    def test_a_directory_in_the_way_of_the_output_is_reported(self, make_run, tmp_path):
+        out = tmp_path / "report.html"
+        out.mkdir()
+
+        with pytest.raises(ReportError) as excinfo:
+            write_report(load_run(make_run()), out, fmt="html")
+
+        assert str(out) in str(excinfo.value)
+
+    def test_an_unwritable_parent_path_is_reported(self, make_run, tmp_path):
+        blocker = tmp_path / "notes.txt"
+        blocker.write_text("not a directory")
+
+        with pytest.raises(ReportError, match="cannot write"):
+            write_report(load_run(make_run()), blocker / "report.html", fmt="html")
+
     def test_an_unknown_format_is_refused(self, make_run, tmp_path):
         with pytest.raises(ReportError, match="format"):
             write_report(load_run(make_run()), tmp_path / "r.html", fmt="pdf")

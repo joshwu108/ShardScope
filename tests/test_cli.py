@@ -172,6 +172,16 @@ class TestReportCommand:
         assert not out.exists()
         assert not out.parent.exists()
 
+    def test_an_unwritable_output_exits_two_with_one_line(self, make_run, tmp_path, capsys):
+        out = tmp_path / "report.html"
+        out.mkdir()
+
+        assert main(["report", "--run", str(make_run()), "--out", str(out)]) == 2
+
+        err = capsys.readouterr().err
+        assert err.startswith("error: ")
+        assert "cannot write" in err
+
     def test_a_missing_run_directory_exits_two_with_one_line(self, tmp_path, capsys):
         assert main(["report", "--run", str(tmp_path / "absent")]) == 2
 
