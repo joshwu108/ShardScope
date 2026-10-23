@@ -111,8 +111,9 @@ A run directory is whatever ``--out-dir`` wrote: ``steps.csv``,
 The format follows the output suffix (``.html``, ``.htm``, ``.json``,
 ``.csv``) and ``--format`` overrides it. Without ``--out`` the report goes to
 stdout, which makes ``--format csv`` and ``--format json`` usable in a pipe.
-``--max-rows`` caps the inline per-step table; a truncated table says how
-many rows it is hiding and that the rest are in ``steps.csv``.
+``--max-rows`` caps the per-step table in the HTML view; a truncated table
+says how many rows it is hiding and that the rest are in ``steps.csv``. The
+``json`` and ``csv`` views always carry every row.
 
 The HTML report is one self-contained file: no scripts, no stylesheets, no
 network references. Everything interpolated into it -- provenance strings,

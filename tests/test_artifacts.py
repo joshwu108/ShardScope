@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -355,6 +356,15 @@ class TestDiscoverRuns:
     def test_a_missing_root_is_refused(self, tmp_path):
         with pytest.raises(ArtifactError, match="no such"):
             discover_runs(tmp_path / "absent")
+
+    def test_an_unreadable_root_is_an_actionable_error(self, tmp_path, monkeypatch):
+        def deny(self):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "iterdir", deny)
+
+        with pytest.raises(ArtifactError, match="cannot read the contents"):
+            discover_runs(tmp_path)
 
     def test_a_file_root_is_refused(self, tmp_path):
         target = tmp_path / "file.txt"

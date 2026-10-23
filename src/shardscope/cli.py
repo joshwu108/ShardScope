@@ -191,8 +191,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_ROWS,
         help=(
-            f"per-step rows to show inline (default {DEFAULT_MAX_ROWS}); a truncated "
-            "table says how many rows it is hiding and where the rest are"
+            f"per-step rows to show in the HTML table (default {DEFAULT_MAX_ROWS}); a "
+            "truncated table says how many rows it is hiding and where the rest are. "
+            "The json and csv views always carry every row"
         ),
     )
 

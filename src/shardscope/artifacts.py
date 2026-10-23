@@ -238,7 +238,7 @@ def discover_runs(root: str | Path) -> tuple[Path, ...]:
         )
     if not target.is_dir():
         raise ArtifactError(f"{target} is not a directory, so it cannot contain runs.")
-    return tuple(sorted(child for child in target.iterdir() if looks_like_run(child)))
+    return tuple(sorted(child for child in _entries(target) if looks_like_run(child)))
 
 
 def load_run(path: str | Path) -> RunArtifacts:
@@ -286,8 +286,23 @@ def load_run(path: str | Path) -> RunArtifacts:
         steps=load_steps_csv(steps_path),
         environment=environment,
         summary=summary,
-        artifact_names=tuple(sorted(item.name for item in run_dir.iterdir() if item.is_file())),
+        artifact_names=tuple(sorted(item.name for item in _entries(run_dir) if item.is_file())),
     )
+
+
+def _entries(target: Path) -> tuple[Path, ...]:
+    """List a directory, turning an OS-level failure into an actionable line.
+
+    Reading a directory can fail for ordinary reasons (permissions, a stale
+    mount). Letting that surface as a traceback from inside the construction
+    of *another* error message would hide which run was being read.
+    """
+    try:
+        return tuple(target.iterdir())
+    except OSError as exc:
+        raise ArtifactError(
+            f"cannot read the contents of {target}: {exc.strerror or exc}."
+        ) from exc
 
 
 def _discovery_hint(run_dir: Path) -> str:
