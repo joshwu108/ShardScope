@@ -310,10 +310,11 @@ Troubleshooting
   ``--out-dir`` at a new or existing directory.
 
 ``error: the run finished but its artifacts could not be written to <dir>``
-  The measurements are gone -- the run has to be repeated. Usually a full
-  disk or a permission change during the run. The directory may hold a
-  partial artifact triple; ``shardscope report`` refuses it rather than
-  rendering a run that was not fully recorded.
+  The run is not recorded and has to be repeated. Usually a full disk or a
+  permission change during the run. The three files are written in
+  sequence, so the directory may hold an incomplete set;
+  ``shardscope report`` refuses such a directory rather than rendering a
+  run that was not fully recorded.
 
 ``error: cannot tell the report format from 'x.pdf'``
   Use an ``.html``, ``.htm``, ``.json`` or ``.csv`` suffix, or pass
@@ -345,11 +346,12 @@ commands ran.
    $ python tools/dev.py format     # ruff format (rewrites files)
    $ python tools/dev.py ci         # the full CI sequence, in order
 
-``ci`` runs, in order:
-``lint``, ``format-check``, ``cov`` (pytest plus the 80% coverage gate),
-``readme-check`` (this file parses with no docutils warnings), the
-commit-skill bootstrap reproducibility check, the git ignore-policy
-assertions, and ``smoke``.
+``ci`` runs, in order: ``lint``, ``format-check``, ``readme-check`` (this
+file parses with no docutils warnings), ``cov`` (pytest plus the 80%
+coverage gate), ``bootstrap-check`` (the commit skill regenerates
+byte-identically), ``ignore-policy``, and ``smoke``. The cheap static gates
+come first so a typo fails in seconds. ``python tools/dev.py --list`` is the
+authority; this paragraph is prose about it.
 
 ``smoke`` is the end-to-end gate: it checks the console script's version
 against the installed distribution, runs ``shardscope env``, runs the
