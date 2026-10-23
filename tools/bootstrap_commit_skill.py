@@ -74,13 +74,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     status, found = reference_status()
-    rendered = render(TEMPLATE.read_text(), status)
+    # UTF-8 on both sides, not the locale default: --check asserts the
+    # generated skill is byte-identical to a fresh render, and a machine
+    # whose locale encoding is not UTF-8 would fail that for no real reason.
+    rendered = render(TEMPLATE.read_text(encoding="utf-8"), status)
 
     if args.check:
         if not TARGET.is_file():
             print(f"missing: {TARGET} -- run 'python {Path(__file__).name}'", file=sys.stderr)
             return 1
-        if TARGET.read_text() != rendered:
+        if TARGET.read_text(encoding="utf-8") != rendered:
             print(f"stale: {TARGET} differs from the tracked template", file=sys.stderr)
             return 1
         print(f"ok: {TARGET} is current")
@@ -88,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     TARGET.parent.mkdir(parents=True, exist_ok=True)
-    TARGET.write_text(rendered)
+    TARGET.write_text(rendered, encoding="utf-8")
     print(f"wrote {TARGET}")
     print(f"reference skill: {status}")
     if not found:

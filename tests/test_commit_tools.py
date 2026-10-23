@@ -120,3 +120,98 @@ def test_rendered_skill_has_no_unfilled_placeholder():
     rendered = bootstrap.render(template, "reviewed from somewhere")
     assert "@@REFERENCE_STATUS@@" not in rendered
     assert "Never `git push`" in rendered
+
+
+class TestAuthorizationIsNeverOverwritten:
+    """The auth file is the student's recorded consent, not agent state.
+
+    An agent that could rewrite it could grant itself permission, so
+    ``--authorize`` only ever creates the file, and the template it creates
+    is unauthorized.
+    """
+
+    def test_an_existing_auth_file_is_left_byte_for_byte_alone(self, tmp_path, monkeypatch, capsys):
+        recorded = (
+            '{\n  "authorized": true,\n  "author_name": "student",\n'
+            '  "author_email": "s@example.com",\n  "allow_patterns": ["src/**"]\n}\n'
+        )
+        auth = tmp_path / commit_safe.AUTH_FILE
+        auth.write_text(recorded, encoding="utf-8")
+        monkeypatch.setattr(commit_safe, "repo_root", lambda: tmp_path)
+
+        assert commit_safe.main(["--authorize"]) == 0
+
+        assert auth.read_text(encoding="utf-8") == recorded
+        assert "leaving it untouched" in capsys.readouterr().out
+
+    def test_the_created_template_is_not_pre_authorized(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(commit_safe, "repo_root", lambda: tmp_path)
+
+        assert commit_safe.main(["--authorize"]) == 0
+
+        payload = json.loads((tmp_path / commit_safe.AUTH_FILE).read_text(encoding="utf-8"))
+        assert payload["authorized"] is False
+        assert payload["author_name"] == ""
+
+
+class TestBootstrapWritesOnlyTheSkill:
+    """Regenerating the skill must not disturb anything else on disk.
+
+    ``.agents/`` can hold hand-written instructions and the repo root holds
+    the auth file. Both are git-ignored, so git would not notice them being
+    clobbered -- this test is the only thing that would.
+    """
+
+    @staticmethod
+    def _snapshot(root: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    @pytest.fixture
+    def sandbox(self, tmp_path, monkeypatch):
+        """A miniature repo: the tracked template plus local-only files."""
+        (tmp_path / "tools").mkdir()
+        (tmp_path / "tools" / "commit_skill_template.txt").write_text(
+            "# skill\n\nReference: @@REFERENCE_STATUS@@\n", encoding="utf-8"
+        )
+        (tmp_path / commit_safe.AUTH_FILE).write_text(
+            '{"authorized": true, "author_name": "student"}\n', encoding="utf-8"
+        )
+        (tmp_path / ".agents").mkdir()
+        (tmp_path / ".agents" / "custom-instructions.md").write_text(
+            "hand-written, local only\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        return tmp_path
+
+    def test_only_the_skill_file_appears(self, sandbox, capsys):
+        before = self._snapshot(sandbox)
+
+        # 3 is the honest "written, but ~/beacon-climb is absent" code; 0 is
+        # the same write with the reference present. Either is a write.
+        assert bootstrap.main([]) in (0, 3)
+
+        after = self._snapshot(sandbox)
+        assert set(after) - set(before) == {str(bootstrap.TARGET)}
+        unchanged = {path: blob for path, blob in after.items() if path in before}
+        assert unchanged == before
+
+    def test_the_regenerated_skill_verifies_as_current(self, sandbox, capsys):
+        bootstrap.main([])
+
+        assert bootstrap.main(["--check"]) == 0
+
+    def test_check_reports_a_hand_edited_skill_as_stale(self, sandbox, capsys):
+        bootstrap.main([])
+        (sandbox / bootstrap.TARGET).write_text("edited by hand\n", encoding="utf-8")
+
+        assert bootstrap.main(["--check"]) == 1
+        assert "stale" in capsys.readouterr().err
+
+    def test_check_does_not_write_the_skill(self, sandbox, capsys):
+        assert bootstrap.main(["--check"]) == 1
+        assert not (sandbox / bootstrap.TARGET).exists()
+        assert "missing" in capsys.readouterr().err

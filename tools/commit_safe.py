@@ -111,7 +111,7 @@ def load_auth(root: Path) -> dict:
             " then have the student fill in and approve it."
         )
     try:
-        auth = json.loads(path.read_text())
+        auth = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise CommitRefused(f"{AUTH_FILE} is not valid JSON: {exc}") from exc
 
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             if path.exists():
                 print(f"{AUTH_FILE} already exists; leaving it untouched.")
                 return 0
-            path.write_text(json.dumps(AUTH_TEMPLATE, indent=2) + "\n")
+            path.write_text(json.dumps(AUTH_TEMPLATE, indent=2) + "\n", encoding="utf-8")
             print(f"wrote {path}. The student must set authorized=true and the identity.")
             return 0
 
