@@ -185,15 +185,42 @@ class TestFieldAvailability:
         assert "trace_rank_0.json" in status.detail
         assert status.state == NOT_RECORDED
 
-    def test_an_unreadable_device_count_is_treated_as_no_device(self, make_run):
-        # Provenance is preserved verbatim, so a damaged device_count reaches
-        # the report. Guessing a device count would be worse than reporting
-        # that nothing could be observed.
-        environment = {**GOOD_ENVIRONMENT, "cuda_available": True, "device_count": "two"}
+    @pytest.mark.parametrize("field", ["gpu_activity", "collective_activity"])
+    @pytest.mark.parametrize(
+        "environment",
+        [
+            {key: value for key, value in GOOD_ENVIRONMENT.items() if key != "device_count"},
+            {key: value for key, value in GOOD_ENVIRONMENT.items() if key != "cuda_available"},
+            {**GOOD_ENVIRONMENT, "cuda_available": True, "device_count": "two"},
+            {**GOOD_ENVIRONMENT, "cuda_available": "yes"},
+        ],
+        ids=["no-count", "no-flag", "count-not-an-integer", "flag-not-a-boolean"],
+    )
+    def test_an_unrecorded_device_inventory_is_not_reported_as_no_device(
+        self, make_run, environment, field
+    ):
+        # Saying "this run recorded 0 CUDA devices" about provenance that
+        # recorded no such thing is a fabricated fact, exactly like turning an
+        # absent measurement into zero.
+        status = _status(load_run(make_run(environment=environment)), field)
+
+        assert status.state == NOT_RECORDED
+        assert "0 CUDA device" not in status.detail
+        assert "inventory" in status.detail
+
+    def test_a_negative_device_count_is_not_a_device_count(self, make_run):
+        environment = {**GOOD_ENVIRONMENT, "cuda_available": True, "device_count": -1}
 
         status = _status(load_run(make_run(environment=environment)), "gpu_activity")
 
-        assert status.state == NOT_OBSERVED
+        assert status.state == NOT_RECORDED
+
+    def test_an_unrecorded_device_inventory_names_the_offending_key(self, make_run):
+        environment = {**GOOD_ENVIRONMENT, "device_count": "two"}
+
+        detail = _status(load_run(make_run(environment=environment)), "gpu_activity").detail
+
+        assert "device_count" in detail
 
     def test_the_run_manifest_names_the_provenance_files_found(self, make_run):
         status = _status(load_run(make_run()), "run_manifest")
@@ -227,6 +254,18 @@ class TestHtmlReport:
         assert hostile not in html
         assert "&lt;script&gt;" in html
         assert "alert(&#x27;xss&#x27;)" in html or "alert('xss')" not in html
+
+    def test_non_ascii_provenance_survives_the_round_trip(self, make_run):
+        # Device names and config paths come from the machine that ran the
+        # job; a non-UTF-8 read would corrupt them or crash on them.
+        name = "NVIDIA A100 \u2014 b\u00fcro-\u30b5\u30fc\u30d0\u30fc"
+        environment = {**GOOD_ENVIRONMENT, "device_names": [name], "platform": name}
+
+        run = load_run(make_run(environment=environment))
+        html = render_html(run)
+
+        assert run.environment["platform"] == name
+        assert name in html
 
     def test_an_unprofiled_run_is_labelled_and_fenced_off_from_throughput(self, make_run):
         html = render_html(load_run(make_run()))
@@ -367,6 +406,16 @@ class TestJsonAndCsvViews:
 
         assert payload["summary"] is None
 
+    def test_a_non_finite_loss_survives_the_json_view(self, make_run):
+        # A diverged run can record nan. json.dumps spells it as the
+        # non-standard token NaN; this round trip is what the docstring
+        # promises, and the caveat is documented there.
+        run = load_run(make_run(steps_csv=_csv("0,nan,2.0,host,True")))
+
+        restored = RunArtifacts.from_dict(json.loads(render_json(run)))
+
+        assert restored == run or str(restored.steps[0].loss) == "nan"
+
     def test_the_json_view_carries_the_availability_statuses(self, make_run):
         payload = json.loads(render_json(load_run(make_run())))
 
@@ -424,6 +473,13 @@ class TestWriteReport:
     def test_an_unknown_format_is_refused(self, make_run, tmp_path):
         with pytest.raises(ReportError, match="format"):
             write_report(load_run(make_run()), tmp_path / "r.html", fmt="pdf")
+
+    @pytest.mark.parametrize("fmt", REPORT_FORMATS)
+    def test_a_non_positive_row_cap_is_refused_for_every_format(self, make_run, fmt):
+        # The flag is accepted by the CLI whatever the format, so accepting a
+        # nonsensical value for two of three formats is a trap.
+        with pytest.raises(ReportError, match="max_rows"):
+            render(load_run(make_run()), fmt, max_rows=0)
 
     def test_render_dispatches_on_format(self, make_run):
         run = load_run(make_run())

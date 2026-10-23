@@ -250,7 +250,7 @@ def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="") as handle:
+    with target.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(STEP_CSV_COLUMNS))
         writer.writeheader()
         for record in records:
@@ -372,8 +372,10 @@ def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) ->
         profiled=False,
         source="examples/train_single.py",
     )
-    (out_dir / "environment.json").write_text(environment.to_json() + "\n")
-    (out_dir / "summary.json").write_text(json.dumps(stats, indent=2, sort_keys=True) + "\n")
+    (out_dir / "environment.json").write_text(environment.to_json() + "\n", encoding="utf-8")
+    (out_dir / "summary.json").write_text(
+        json.dumps(stats, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

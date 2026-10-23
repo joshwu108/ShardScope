@@ -144,15 +144,19 @@ def _h2d_copy_ms(run: RunArtifacts) -> FieldStatus:
 
 
 def _gpu_activity(run: RunArtifacts) -> FieldStatus:
-    count = _cuda_device_count(run)
-    if not _cuda_available(run) or count == 0:
+    inventory, problem = _device_inventory(run)
+    if inventory is None:
+        return FieldStatus("gpu_activity", NOT_RECORDED, _no_inventory_detail(problem))
+
+    available, count = inventory
+    if not available or count == 0:
         return FieldStatus(
             "gpu_activity",
             NOT_OBSERVED,
             f"This run's {ENVIRONMENT_JSON} records cuda_available="
-            f"{_json_bool(_cuda_available(run))} and {count} CUDA device(s), so no "
-            "CUDA kernel activity could have been observed while it ran. Reporting "
-            "a number here would describe a device that was not used.",
+            f"{_json_bool(available)} and {count} CUDA device(s), so no CUDA kernel "
+            "activity could have been observed while it ran. Reporting a number "
+            "here would describe a device that was not used.",
         )
     return FieldStatus(
         "gpu_activity",
@@ -164,8 +168,12 @@ def _gpu_activity(run: RunArtifacts) -> FieldStatus:
 
 
 def _collective_activity(run: RunArtifacts) -> FieldStatus:
-    count = _cuda_device_count(run)
-    if not distributed_capable(cuda_available=_cuda_available(run), device_count=count):
+    inventory, problem = _device_inventory(run)
+    if inventory is None:
+        return FieldStatus("collective_activity", NOT_RECORDED, _no_inventory_detail(problem))
+
+    available, count = inventory
+    if not distributed_capable(cuda_available=available, device_count=count):
         return FieldStatus(
             "collective_activity",
             NOT_OBSERVED,
@@ -293,15 +301,41 @@ _STATUS_BUILDERS = {
 }
 
 
-def _cuda_available(run: RunArtifacts) -> bool:
-    return bool(run.environment.get("cuda_available"))
+def _device_inventory(run: RunArtifacts) -> tuple[tuple[bool, int] | None, str]:
+    """Read ``(cuda_available, device_count)`` out of the recorded provenance.
+
+    Returns ``(None, problem)`` when either key is absent or unreadable.
+    Defaulting them to ``false``/``0`` would make the report *state* that the
+    run saw no CUDA device -- a fact the artifact never recorded. That is the
+    same mistake as turning an absent measurement into zero, so an
+    unreadable inventory stays unreadable and says which key is at fault.
+    """
+    environment = run.environment
+    available: Any = environment.get("cuda_available")
+    count: Any = environment.get("device_count")
+
+    if available is None:
+        return None, f"'cuda_available' is absent from {ENVIRONMENT_JSON}"
+    if not isinstance(available, bool):
+        return None, f"'cuda_available' is {available!r}, not true or false"
+    if count is None:
+        return None, f"'device_count' is absent from {ENVIRONMENT_JSON}"
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None, f"'device_count' is {count!r}, not an integer"
+    if count < 0:
+        return None, f"'device_count' is {count}, which is not a device count"
+    return (available, count), ""
 
 
-def _cuda_device_count(run: RunArtifacts) -> int:
-    value: Any = run.environment.get("device_count")
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    return value
+def _no_inventory_detail(problem: str) -> str:
+    return (
+        f"This run did not record a readable CUDA device inventory: {problem}. "
+        "Whether this activity could have been observed therefore cannot be "
+        "judged from the run's own provenance, and nothing captured it either "
+        "(the bounded capture is unimplemented, GATE 2.1-2.3). Treating the "
+        "absent inventory as zero devices would state a fact the run never "
+        "recorded."
+    )
 
 
 def _json_bool(value: bool) -> str:

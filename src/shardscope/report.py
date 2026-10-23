@@ -55,6 +55,12 @@ def render_json(run: RunArtifacts, *, indent: int = 2) -> str:
     ``RunArtifacts.from_dict`` reads this back, so a JSON report is a
     loadable artifact rather than a dead end. An absent measurement stays
     ``null``: a consumer must be able to tell "not recorded" from a value.
+
+    Caveat, deliberately not papered over: a diverged run can record a loss
+    of ``nan`` or ``inf``, and :func:`json.dumps` spells those as the
+    non-standard tokens ``NaN``/``Infinity``. Python reads them back, strict
+    parsers elsewhere will not. The alternative -- writing ``null`` -- would
+    turn a recorded measurement into a missing one, which is worse.
     """
     payload = {
         **run.to_dict(),
@@ -80,7 +86,18 @@ def render(
     generated_at: str | None = None,
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> str:
-    """Render ``run`` in ``fmt``, raising :class:`ReportError` for an unknown one."""
+    """Render ``run`` in ``fmt``, raising :class:`ReportError` for an unknown one.
+
+    ``max_rows`` only truncates the HTML table -- the json and csv views
+    always carry every row -- but a non-positive value is refused whatever
+    the format, because the flag is accepted whatever the format and
+    silently ignoring it for two of three would be a trap.
+    """
+    if max_rows <= 0:
+        raise ReportError(
+            f"max_rows must be positive, got {max_rows}. A report with no step rows "
+            "would read as a run that measured nothing."
+        )
     if fmt == "html":
         return render_html(run, generated_at=generated_at, max_rows=max_rows)
     if fmt == "json":
@@ -122,7 +139,11 @@ def write_report(
     target = Path(out)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
+        # newline="" and an explicit encoding: the CSV view promises bytes
+        # identical to the producer's file, which rules out newline
+        # translation and a locale-dependent encoding.
+        with target.open("w", newline="", encoding="utf-8") as handle:
+            handle.write(text)
     except OSError as exc:
         # A directory in the way, or a file where a directory belongs, is the
         # user's mistake and deserves a sentence rather than a traceback.

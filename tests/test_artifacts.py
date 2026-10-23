@@ -68,6 +68,15 @@ class TestLoadStepsCsv:
 
         assert len(load_steps_csv(path)) == 1
 
+    def test_an_undecodable_file_is_refused_with_a_reason(self, tmp_path):
+        path = tmp_path / STEPS_CSV
+        path.write_bytes(
+            b"step,loss,step_time_ms,data_residency,synchronized\n0,1.0,2.0,h\xffst,True\n"
+        )
+
+        with pytest.raises(ArtifactError, match="UTF-8"):
+            load_steps_csv(path)
+
     def test_a_missing_file_names_the_path(self, tmp_path):
         with pytest.raises(ArtifactError, match=str(tmp_path / STEPS_CSV)):
             load_steps_csv(tmp_path / STEPS_CSV)
@@ -264,6 +273,13 @@ class TestLoadRun:
         with pytest.raises(ArtifactError, match="JSON object"):
             load_run(make_run(environment=payload))
 
+    def test_an_undecodable_json_artifact_is_refused_with_a_reason(self, make_run):
+        run_dir = make_run()
+        (run_dir / ENVIRONMENT_JSON).write_bytes(b'{"platform": "\xff"}')
+
+        with pytest.raises(ArtifactError, match="UTF-8"):
+            load_run(run_dir)
+
     def test_a_non_object_extra_block_is_refused(self, make_run):
         with pytest.raises(ArtifactError, match="extra"):
             load_run(make_run(environment={**GOOD_ENVIRONMENT, "extra": [1, 2]}))
@@ -405,6 +421,17 @@ class TestSerialization:
 
         assert load_steps_csv(path) == rows
 
+    def test_the_writer_does_not_translate_newlines(self, make_run, tmp_path):
+        # steps_csv_text goes to the trouble of forcing \n; writing it back
+        # through a translating text stream would undo that on Windows and
+        # break the byte-identical round trip the docstrings promise.
+        rows = load_steps_csv(make_run() / STEPS_CSV)
+        out = tmp_path / STEPS_CSV
+
+        write_steps_csv(out, rows)
+
+        assert b"\r\n" not in out.read_bytes()
+
     def test_writing_no_rows_is_refused(self, tmp_path):
         with pytest.raises(ArtifactError, match="no rows"):
             write_steps_csv(tmp_path / STEPS_CSV, ())
@@ -458,6 +485,46 @@ class TestSerialization:
 
         with pytest.raises(ArtifactError, match="step_time_ms"):
             RunArtifacts.from_dict(payload)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected"),
+        [
+            ("step", True, "integer"),
+            ("step", "0", "integer"),
+            ("loss", "1.0", "number"),
+            ("step_time_ms", -5, "negative"),
+            ("step_time_ms", float("inf"), "finite"),
+            ("step_time_ms", "2.0", "number"),
+            ("data_residency", "nowhere", "data_residency"),
+            ("synchronized", "false", "true or false"),
+            ("synchronized", 1, "true or false"),
+        ],
+    )
+    def test_from_dict_enforces_the_same_invariants_as_the_csv_loader(
+        self, make_run, field, value, expected
+    ):
+        # Two loaders of the same record type must not trust their input to
+        # different degrees: a JSON report is an input like any other.
+        payload = load_run(make_run()).to_dict()
+        payload["steps"][0][field] = value
+
+        with pytest.raises(ArtifactError) as excinfo:
+            RunArtifacts.from_dict(payload)
+
+        assert expected in str(excinfo.value)
+
+    def test_from_dict_accepts_an_integer_where_a_float_belongs(self, make_run):
+        # JSON writes 2.0 as 2; refusing that would reject our own output.
+        payload = load_run(make_run()).to_dict()
+        payload["steps"][0]["step_time_ms"] = 2
+
+        assert RunArtifacts.from_dict(payload).steps[0].step_time_ms == 2
+
+    def test_from_dict_keeps_a_non_finite_loss(self, make_run):
+        payload = load_run(make_run()).to_dict()
+        payload["steps"][0]["loss"] = float("nan")
+
+        assert math.isnan(RunArtifacts.from_dict(payload).steps[0].loss)
 
     def test_from_dict_refuses_a_non_object_summary(self, make_run):
         payload = {**load_run(make_run()).to_dict(), "summary": [1, 2]}

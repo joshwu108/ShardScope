@@ -110,18 +110,26 @@ class StepRow:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> StepRow:
+        """Build a row from an already-typed mapping, validating it.
+
+        The CSV loader and this one are two doors into the same record type,
+        so they enforce the same rules: a JSON report is an input like any
+        other, and a consumer that trusted it less than the CSV would be a
+        hole in the validation boundary.
+        """
         missing = [name for name in STEP_COLUMNS if name not in payload]
         if missing:
             raise ArtifactError(
                 f"step record is missing field(s): {', '.join(missing)}. "
                 f"Expected: {', '.join(STEP_COLUMNS)}."
             )
-        return cls(
+        return _checked_step(
             step=payload["step"],
             loss=payload["loss"],
             step_time_ms=payload["step_time_ms"],
             data_residency=payload["data_residency"],
             synchronized=payload["synchronized"],
+            where="step record",
         )
 
 
@@ -188,7 +196,14 @@ class RunArtifacts:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> RunArtifacts:
-        """Rebuild a run from :meth:`to_dict` output (the JSON report view)."""
+        """Rebuild a run from :meth:`to_dict` output (the JSON report view).
+
+        ``path``, ``environment`` and ``steps`` are required. ``summary`` and
+        ``artifact_names`` may be absent: the first is an optional artifact
+        and stays ``None``, and the second is a directory listing rather
+        than a measurement -- an empty one renders as "no file list shown",
+        not as "the directory was empty".
+        """
         if not isinstance(payload, Mapping):
             raise ArtifactError(
                 f"not a serialized run: expected a JSON object, got {type(payload).__name__}."
@@ -321,14 +336,21 @@ def load_steps_csv(path: str | Path) -> tuple[StepRow, ...]:
     target = Path(path)
     try:
         # Universal newlines on read, so a CSV written on Windows loads too;
-        # splitlines() below then feeds csv.reader one record per line.
-        text = target.read_text()
+        # splitlines() below then feeds csv.reader one record per line. UTF-8
+        # explicitly: a device name or config path can be non-ASCII, and the
+        # locale default is not UTF-8 everywhere on Python 3.10-3.12.
+        text = target.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise ArtifactError(
             f"no such per-step CSV: {target}. Columns expected: {', '.join(STEP_COLUMNS)}."
         ) from exc
     except IsADirectoryError as exc:
         raise ArtifactError(f"{target} is a directory, not a {STEPS_CSV} file.") from exc
+    except UnicodeDecodeError as exc:
+        raise ArtifactError(
+            f"{target} is not valid UTF-8 ({exc.reason} at byte {exc.start}). "
+            "Per-step CSVs are written as UTF-8."
+        ) from exc
     except OSError as exc:  # pragma: no cover - permissions/IO specific
         raise ArtifactError(f"cannot read {target}: {exc}") from exc
 
@@ -414,22 +436,73 @@ def _parse_row(values: Sequence[str], *, target: Path, row_number: int) -> StepR
     # explicitly because a silent zip truncation is exactly the bug the
     # length checks exist to prevent.
     cells = dict(zip(STEP_COLUMNS, (value.strip() for value in values), strict=True))
-    return StepRow(
+    # Strings first become values (type errors name the column), then go
+    # through the same checker the JSON path uses for range and choice.
+    return _checked_step(
         step=_parse_int(cells["step"], where=where, column="step"),
-        # A diverged run really can record nan or inf as its loss. That is a
-        # measurement, and hiding it would hide the divergence.
-        loss=_parse_float(cells["loss"], where=where, column="loss", finite=False),
-        step_time_ms=_parse_float(
-            cells["step_time_ms"], where=where, column="step_time_ms", non_negative=True
-        ),
-        data_residency=_parse_choice(
-            cells["data_residency"],
-            where=where,
-            column="data_residency",
-            choices=DATA_RESIDENCY_CHOICES,
-        ),
+        loss=_parse_float(cells["loss"], where=where, column="loss"),
+        step_time_ms=_parse_float(cells["step_time_ms"], where=where, column="step_time_ms"),
+        data_residency=cells["data_residency"],
         synchronized=_parse_bool(cells["synchronized"], where=where, column="synchronized"),
+        where=where,
     )
+
+
+def _checked_step(
+    *,
+    step: Any,
+    loss: Any,
+    step_time_ms: Any,
+    data_residency: Any,
+    synchronized: Any,
+    where: str,
+) -> StepRow:
+    """Validate already-typed field values and build the row.
+
+    The single place the per-step invariants live: integer step index, a loss
+    that may be non-finite (a diverged run really records nan, and hiding it
+    would hide the divergence), a finite non-negative duration, a known
+    residency mode, and a real boolean synchronize policy.
+    """
+    _require_int(step, where=where, column="step")
+    _require_number(loss, where=where, column="loss", finite=False)
+    _require_number(step_time_ms, where=where, column="step_time_ms", non_negative=True)
+    if data_residency not in DATA_RESIDENCY_CHOICES:
+        raise ArtifactError(
+            f"{where}: column 'data_residency' must be one of "
+            f"{', '.join(DATA_RESIDENCY_CHOICES)}; got {data_residency!r}."
+        )
+    if not isinstance(synchronized, bool):
+        raise ArtifactError(
+            f"{where}: column 'synchronized' must be true or false, got {synchronized!r}."
+        )
+    return StepRow(
+        step=step,
+        loss=float(loss),
+        step_time_ms=float(step_time_ms),
+        data_residency=data_residency,
+        synchronized=synchronized,
+    )
+
+
+def _require_int(value: Any, *, where: str, column: str) -> None:
+    # bool is a subclass of int; a step index of `true` is a mistake, not a 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ArtifactError(f"{where}: column {column!r} must be an integer, got {value!r}.")
+
+
+def _require_number(
+    value: Any, *, where: str, column: str, finite: bool = True, non_negative: bool = False
+) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ArtifactError(f"{where}: column {column!r} must be a number, got {value!r}.")
+    if finite and not math.isfinite(value):
+        raise ArtifactError(f"{where}: column {column!r} must be finite, got {value!r}.")
+    if non_negative and value < 0:
+        raise ArtifactError(
+            f"{where}: column {column!r} must not be negative, got {value!r}. "
+            "A negative duration means the file is damaged, not that the step was fast."
+        )
 
 
 def _parse_int(value: str, *, where: str, column: str) -> int:
@@ -441,29 +514,12 @@ def _parse_int(value: str, *, where: str, column: str) -> int:
         ) from exc
 
 
-def _parse_float(
-    value: str, *, where: str, column: str, finite: bool = True, non_negative: bool = False
-) -> float:
+def _parse_float(value: str, *, where: str, column: str) -> float:
+    """Convert one CSV cell to a float; range checks live in _checked_step."""
     try:
-        number = float(value)
+        return float(value)
     except ValueError as exc:
         raise ArtifactError(f"{where}: column {column!r} must be a number, got {value!r}.") from exc
-    if finite and not math.isfinite(number):
-        raise ArtifactError(f"{where}: column {column!r} must be finite, got {value!r}.")
-    if non_negative and number < 0:
-        raise ArtifactError(
-            f"{where}: column {column!r} must not be negative, got {value!r}. "
-            "A negative duration means the file is damaged, not that the step was fast."
-        )
-    return number
-
-
-def _parse_choice(value: str, *, where: str, column: str, choices: tuple[str, ...]) -> str:
-    if value not in choices:
-        raise ArtifactError(
-            f"{where}: column {column!r} must be one of {', '.join(choices)}; got {value!r}."
-        )
-    return value
 
 
 def _parse_bool(value: str, *, where: str, column: str) -> bool:
@@ -497,7 +553,13 @@ def steps_csv_text(rows: Sequence[StepRow]) -> str:
 
 
 def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
-    """Write ``rows`` to ``path`` as a per-step CSV; see :func:`steps_csv_text`."""
+    """Write ``rows`` to ``path`` as a per-step CSV; see :func:`steps_csv_text`.
+
+    Opened with ``newline=""`` so the ``\n`` line endings
+    :func:`steps_csv_text` went to the trouble of forcing are not translated
+    to CRLF on Windows -- that would quietly break the byte-identical round
+    trip with the producer.
+    """
     if not rows:
         raise ArtifactError(
             f"refusing to write a per-step CSV with no rows: {path}. "
@@ -505,13 +567,20 @@ def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
         )
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(steps_csv_text(rows))
+    with target.open("w", newline="", encoding="utf-8") as handle:
+        handle.write(steps_csv_text(rows))
     return target
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ArtifactError(
+            f"{path} is not valid UTF-8 ({exc.reason} at byte {exc.start}). "
+            "Artifacts are written as UTF-8; re-produce the run rather than "
+            "reporting a file that cannot be decoded."
+        ) from exc
     except OSError as exc:  # pragma: no cover - permissions/IO specific
         raise ArtifactError(f"cannot read {path}: {exc}") from exc
     try:

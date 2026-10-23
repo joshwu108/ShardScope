@@ -182,6 +182,11 @@ class TestReportCommand:
         assert err.startswith("error: ")
         assert "cannot write" in err
 
+    def test_a_zero_row_cap_is_refused_for_a_csv_report_too(self, make_run, capsys):
+        assert main(["report", "--run", str(make_run()), "--format", "csv", "--max-rows", "0"]) == 2
+
+        assert "max_rows" in capsys.readouterr().err
+
     def test_a_missing_run_directory_exits_two_with_one_line(self, tmp_path, capsys):
         assert main(["report", "--run", str(tmp_path / "absent")]) == 2
 
