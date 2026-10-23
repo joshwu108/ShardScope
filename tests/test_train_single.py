@@ -393,6 +393,98 @@ class TestMain:
             train_single.main(["--device", "tpu"])
 
 
+class TestConfigFile:
+    """``--config`` (PRD v2.0 section 11) and its precedence over flags."""
+
+    @staticmethod
+    def _config(tmp_path, payload) -> str:
+        target = tmp_path / "run.json"
+        target.write_text(json.dumps(payload))
+        return str(target)
+
+    def test_a_config_file_supplies_the_run_knobs(self, tmp_path, capsys):
+        path = self._config(tmp_path, {"steps": 2, "device": "cpu", "data_residency": "device"})
+
+        assert train_single.main(["--config", path, "--quiet"]) == 0
+        out = capsys.readouterr().out
+
+        assert "residency=device" in out
+        assert "steps=2" in out
+
+    def test_an_explicit_flag_overrides_the_config_file(self, tmp_path, capsys):
+        path = self._config(tmp_path, {"steps": 2, "seed": 1, "device": "cpu"})
+
+        train_single.main(["--config", path, "--seed", "99", "--quiet"])
+
+        assert "seed=99" in capsys.readouterr().out
+
+    def test_omitted_flags_do_not_override_the_config_file(self, tmp_path, capsys):
+        # argparse yields None for an unpassed flag; that must not be read
+        # as "the user asked for the default".
+        path = self._config(tmp_path, {"steps": 2, "seed": 7, "device": "cpu"})
+
+        train_single.main(["--config", path, "--quiet"])
+
+        assert "seed=7" in capsys.readouterr().out
+
+    def test_no_sync_overrides_a_synchronizing_config(self, tmp_path, capsys):
+        path = self._config(tmp_path, {"steps": 2, "device": "cpu", "synchronize": True})
+
+        train_single.main(["--config", path, "--no-sync", "--quiet"])
+
+        assert "synchronized=False" in capsys.readouterr().out
+
+    def test_sync_overrides_a_non_synchronizing_config(self, tmp_path, capsys):
+        # Without an explicit --sync there would be no way to re-enable
+        # synchronization from the CLI once a config file disabled it.
+        path = self._config(tmp_path, {"steps": 2, "device": "cpu", "synchronize": False})
+
+        train_single.main(["--config", path, "--sync", "--quiet"])
+
+        assert "synchronized=True" in capsys.readouterr().out
+
+    def test_a_missing_config_file_exits_two_with_an_actionable_message(self, tmp_path, capsys):
+        assert train_single.main(["--config", str(tmp_path / "absent.json")]) == 2
+        assert "no such config file" in capsys.readouterr().err
+
+    def test_an_invalid_config_value_exits_two_without_training(self, tmp_path, capsys):
+        path = self._config(tmp_path, {"steps": 0})
+
+        assert train_single.main(["--config", path]) == 2
+        captured = capsys.readouterr()
+
+        assert "must be positive" in captured.err
+        assert "step " not in captured.out
+
+    def test_a_misspelled_config_key_is_reported_with_a_suggestion(self, tmp_path, capsys):
+        path = self._config(tmp_path, {"batchsize": 4})
+
+        assert train_single.main(["--config", path]) == 2
+        assert "Did you mean 'batch_size'?" in capsys.readouterr().err
+
+    def test_the_written_environment_records_the_config_file_used(self, tmp_path, capsys):
+        # Provenance: a replayed run must be traceable back to the file that
+        # described it (PRD v2.0 section 4, "Run contract").
+        path = self._config(tmp_path, {"steps": 2, "device": "cpu"})
+        out_dir = tmp_path / "run"
+
+        train_single.main(["--config", path, "--quiet", "--out-dir", str(out_dir)])
+        extra = json.loads((out_dir / "environment.json").read_text())["extra"]
+
+        assert extra["config_file"] == path
+        assert extra["steps"] == 2
+
+    def test_the_written_environment_records_no_config_file_when_none_was_used(
+        self, tmp_path, capsys
+    ):
+        train_single.main(
+            ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
+        )
+        extra = json.loads((tmp_path / "environment.json").read_text())["extra"]
+
+        assert extra["config_file"] is None
+
+
 def test_non_positive_sample_counts_are_rejected():
     with pytest.raises(ValueError, match="n_samples"):
         train_single.make_synthetic_dataset(n_samples=0, seed=0)

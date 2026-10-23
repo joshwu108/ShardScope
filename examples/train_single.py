@@ -41,6 +41,7 @@ import argparse
 import csv
 import json
 import math
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -283,19 +284,37 @@ def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI.
+
+    Every run knob defaults to ``None`` rather than to its value, so
+    ``_resolve_config`` can tell "the user passed this" from "the user left
+    it alone" and overlay only explicit flags on top of ``--config``.
+    Defaults themselves live in ``shardscope.config.RunConfig``.
+    """
     parser = argparse.ArgumentParser(description="Tiny single-device training fixture.")
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-    parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--lr", type=float, default=DEFAULT_LEARNING_RATE)
-    parser.add_argument("--device", choices=DEVICE_CHOICES, default="auto")
-    parser.add_argument("--data-residency", choices=DATA_RESIDENCY_CHOICES, default="host")
     parser.add_argument(
-        "--no-sync",
-        action="store_true",
-        help="do not synchronize the device around each step; timings then measure "
-        "kernel launch, not execution",
+        "--config",
+        type=Path,
+        default=None,
+        help="JSON run config (PRD v2.0 section 11); explicit flags below override it",
+    )
+    parser.add_argument("--steps", type=int, default=None, help=f"default {DEFAULT_STEPS}")
+    parser.add_argument(
+        "--batch-size", type=int, default=None, help=f"default {DEFAULT_BATCH_SIZE}"
+    )
+    parser.add_argument("--samples", type=int, default=None, help=f"default {DEFAULT_SAMPLES}")
+    parser.add_argument("--seed", type=int, default=None, help="default 0")
+    parser.add_argument("--lr", type=float, default=None, help=f"default {DEFAULT_LEARNING_RATE}")
+    parser.add_argument("--device", choices=DEVICE_CHOICES, default=None, help="default auto")
+    parser.add_argument(
+        "--data-residency", choices=DATA_RESIDENCY_CHOICES, default=None, help="default host"
+    )
+    parser.add_argument(
+        "--sync",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="synchronize the device around each step (default). --no-sync makes "
+        "timings measure kernel launch, not execution",
     )
     parser.add_argument(
         "--out-dir",
@@ -307,20 +326,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_run_artifacts(out_dir: Path, args, records, stats, device) -> None:
+def _resolve_config(args):
+    """Overlay the explicitly-passed flags on top of ``--config``.
+
+    Returns ``(config, None)`` or ``(None, message)``: a bad config file is
+    the user's mistake, so it becomes one actionable line rather than a
+    traceback. ``shardscope`` is imported here rather than at module scope
+    so this script still runs from a checkout where the package is not
+    installed.
+    """
+    from shardscope.config import RunConfig, load_run_config
+    from shardscope.errors import ShardScopeError
+
+    try:
+        base = load_run_config(args.config) if args.config is not None else RunConfig()
+        return base.merged(
+            steps=args.steps,
+            batch_size=args.batch_size,
+            samples=args.samples,
+            seed=args.seed,
+            learning_rate=args.lr,
+            device=args.device,
+            data_residency=args.data_residency,
+            synchronize=args.sync,
+        ), None
+    except ShardScopeError as exc:
+        return None, str(exc)
+
+
+def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
     from shardscope.env import capture_environment
 
     write_step_csv(out_dir / "steps.csv", records)
     environment = capture_environment().with_extra(
-        steps=args.steps,
-        batch_size=args.batch_size,
-        samples=args.samples,
-        seed=args.seed,
-        learning_rate=args.lr,
-        device_requested=args.device,
+        steps=config.steps,
+        batch_size=config.batch_size,
+        samples=config.samples,
+        seed=config.seed,
+        learning_rate=config.learning_rate,
+        device_requested=config.device,
         device_resolved=device.type,
-        data_residency=args.data_residency,
-        synchronized=not args.no_sync,
+        data_residency=config.data_residency,
+        synchronized=config.synchronize,
+        config_file=str(args.config) if args.config is not None else None,
         profiled=False,
         source="examples/train_single.py",
     )
@@ -331,15 +379,20 @@ def _write_run_artifacts(out_dir: Path, args, records, stats, device) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    config, error = _resolve_config(args)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
     records = run_training(
-        steps=args.steps,
-        batch_size=args.batch_size,
-        device=args.device,
-        seed=args.seed,
-        data_residency=args.data_residency,
-        synchronize=not args.no_sync,
-        n_samples=args.samples,
-        learning_rate=args.lr,
+        steps=config.steps,
+        batch_size=config.batch_size,
+        device=config.device,
+        seed=config.seed,
+        data_residency=config.data_residency,
+        synchronize=config.synchronize,
+        n_samples=config.samples,
+        learning_rate=config.learning_rate,
     )
 
     if not args.quiet:
@@ -347,21 +400,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"step {record.step:4d}  loss {record.loss:8.4f}  {record.step_time_ms:8.3f} ms")
 
     stats = summarize(records)
-    device = resolve_device(args.device)
+    device = resolve_device(config.device)
     print(
-        f"\ndevice={device.type} residency={args.data_residency} "
-        f"synchronized={not args.no_sync} seed={args.seed}"
+        f"\ndevice={device.type} residency={config.data_residency} "
+        f"synchronized={config.synchronize} seed={config.seed}"
     )
     print(
         f"steps={int(stats['steps'])} median={stats['median_step_ms']:.3f} ms "
         f"p95={stats['p95_step_ms']:.3f} ms "
         f"min={stats['min_step_ms']:.3f} ms max={stats['max_step_ms']:.3f} ms"
     )
-    if args.no_sync:
+    if not config.synchronize:
         print("warning: --no-sync timings measure launch, not execution")
 
     if args.out_dir is not None:
-        _write_run_artifacts(args.out_dir, args, records, stats, device)
+        _write_run_artifacts(args.out_dir, args, config, records, stats, device)
         print(f"wrote {args.out_dir}/steps.csv, environment.json, summary.json")
 
     return 0
