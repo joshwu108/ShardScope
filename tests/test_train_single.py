@@ -393,6 +393,73 @@ class TestMain:
             train_single.main(["--device", "tpu"])
 
 
+class TestOutDirIsCheckedBeforeTraining:
+    """A mistyped ``--out-dir`` must cost a second, not a whole run.
+
+    The writes happen after the last step, so without an up-front check a
+    hundred measured steps are thrown away by a traceback from ``mkdir``.
+    """
+
+    def test_an_out_dir_that_is_a_file_is_refused_without_training(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        occupied = tmp_path / "not-a-dir"
+        occupied.write_text("x")
+
+        def fail(**_):
+            raise AssertionError("training ran despite an unusable --out-dir")
+
+        monkeypatch.setattr(train_single, "run_training", fail)
+
+        assert train_single.main(["--steps", "3", "--out-dir", str(occupied)]) == 2
+        captured = capsys.readouterr()
+        assert "exists and is not a directory" in captured.err
+        assert str(occupied) in captured.err
+        assert captured.out == ""
+
+    def test_an_out_dir_under_a_file_is_refused_without_training(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x")
+
+        def fail(**_):
+            raise AssertionError("training ran despite an unusable --out-dir")
+
+        monkeypatch.setattr(train_single, "run_training", fail)
+
+        assert train_single.main(["--steps", "3", "--out-dir", str(blocker / "run")]) == 2
+        assert "is a file, not a directory" in capsys.readouterr().err
+
+    def test_a_usable_out_dir_is_not_created_by_the_check(self, tmp_path):
+        # An empty directory left behind by a refused or failed run reads as
+        # a run that measured nothing, so the check creates nothing.
+        target = tmp_path / "fresh"
+
+        assert train_single.out_dir_problem(target) is None
+        assert not target.exists()
+
+    def test_an_existing_directory_is_accepted(self, tmp_path):
+        assert train_single.out_dir_problem(tmp_path) is None
+
+    def test_a_failed_write_says_the_measurements_were_not_saved(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        def explode(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(train_single, "_write_run_artifacts", explode)
+
+        code = train_single.main(
+            ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path / "run")]
+        )
+        captured = capsys.readouterr()
+
+        assert code == 2
+        assert "No space left on device" in captured.err
+        assert "not saved" in captured.err
+
+
 class TestConfigFile:
     """``--config`` (PRD v2.0 section 11) and its precedence over flags."""
 

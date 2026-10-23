@@ -41,6 +41,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -354,6 +355,33 @@ def _resolve_config(args):
         return None, str(exc)
 
 
+def out_dir_problem(out_dir: Path) -> str | None:
+    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.
+
+    Called before the first step. The artifacts are written after the last
+    one, so without this check a mistyped path throws away every measured
+    step and reports it as a traceback out of ``mkdir``.
+
+    Nothing is created here. A directory made up front would be left behind
+    empty if the run then failed, and an empty run directory reads as a run
+    that measured nothing.
+    """
+    if out_dir.exists() and not out_dir.is_dir():
+        return (
+            f"--out-dir {out_dir} exists and is not a directory. Point it at a new "
+            "or existing directory."
+        )
+
+    ancestor = next((path for path in (out_dir, *out_dir.parents) if path.exists()), None)
+    if ancestor is None:  # pragma: no cover - the filesystem root always exists
+        return f"--out-dir {out_dir} has no existing parent directory to create it under."
+    if not ancestor.is_dir():
+        return f"--out-dir {out_dir} cannot be created: {ancestor} is a file, not a directory."
+    if not os.access(ancestor, os.W_OK):
+        return f"--out-dir {out_dir} is not writable: no write permission on {ancestor}."
+    return None
+
+
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
     from shardscope.env import capture_environment
 
@@ -386,6 +414,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    if args.out_dir is not None:
+        problem = out_dir_problem(args.out_dir)
+        if problem is not None:
+            print(f"error: {problem}", file=sys.stderr)
+            return 2
+
     records = run_training(
         steps=config.steps,
         batch_size=config.batch_size,
@@ -416,7 +450,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("warning: --no-sync timings measure launch, not execution")
 
     if args.out_dir is not None:
-        _write_run_artifacts(args.out_dir, args, config, records, stats, device)
+        try:
+            _write_run_artifacts(args.out_dir, args, config, records, stats, device)
+        except OSError as exc:
+            # The run itself succeeded; say plainly that its artifacts did
+            # not survive, so the numbers above are not mistaken for a
+            # recorded run.
+            print(
+                f"error: the run finished but its artifacts could not be written to "
+                f"{args.out_dir}: {exc.strerror or exc}. The measurements above were "
+                "not saved.",
+                file=sys.stderr,
+            )
+            return 2
         print(f"wrote {args.out_dir}/steps.csv, environment.json, summary.json")
 
     return 0
