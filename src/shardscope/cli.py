@@ -27,6 +27,7 @@ section 10 gates that whole block on a Week 7 review that has not happened.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -44,6 +45,11 @@ from shardscope.report import (
     render,
     write_report,
 )
+
+#: Exit code for "the reader of our stdout pipe hung up": 128 + SIGPIPE, the
+#: shell convention. Distinct from 2 (the user's mistake) and 0 (success), so
+#: a calling script can tell a short read from a bad argument.
+EXIT_BROKEN_PIPE = 141
 
 
 @dataclass(frozen=True)
@@ -265,10 +271,39 @@ def _run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _discard_further_stdout() -> None:
+    """Point stdout at devnull so the interpreter's exit-time flush stays quiet.
+
+    Without this, a closed pipe produces a second complaint -- "Exception
+    ignored in: <_io.TextIOWrapper ...>" -- from the flush CPython runs at
+    shutdown, long after we decided the situation was not an error.
+
+    A captured or substituted stdout has no file descriptor to redirect;
+    there is nothing to silence in that case either.
+    """
+    try:
+        fileno = sys.stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        return
+    os.dup2(os.open(os.devnull, os.O_WRONLY), fileno)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return _dispatch(args)
+        code = _dispatch(args)
+        # Flush inside the try: a short report fits in the pipe buffer, so a
+        # closed reader is only noticed when the buffer drains. Left to the
+        # interpreter's exit-time flush it becomes an "Exception ignored"
+        # line on stderr and exit code 120, which no caller can act on.
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # 'shardscope report --format csv | head' is a documented use, and
+        # the reader is allowed to stop reading. Printing a traceback would
+        # blame ShardScope for someone else's early exit.
+        _discard_further_stdout()
+        return EXIT_BROKEN_PIPE
     except ShardScopeError as exc:
         # One actionable line; a genuine bug still escapes as a traceback.
         print(f"error: {exc}", file=sys.stderr)

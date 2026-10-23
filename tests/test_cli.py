@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
 from conftest import GOOD_STEPS_CSV
 from shardscope import __version__
-from shardscope.cli import PENDING_COMMANDS, build_parser, main
+from shardscope.cli import EXIT_BROKEN_PIPE, PENDING_COMMANDS, build_parser, main
 
 
 def test_env_text_output(capsys):
@@ -241,6 +242,93 @@ class TestReportCommand:
 
         assert "not implemented" not in out.lower()
         assert "--format" in out
+
+
+class TestAClosedStdoutPipe:
+    """``shardscope report ... | head`` must not end in a traceback.
+
+    Reporting to stdout is a documented way to use this command, and the
+    reader of a pipe is allowed to stop reading. That is not a ShardScope
+    bug and must not be printed as one.
+    """
+
+    @staticmethod
+    def _broken_stdout(monkeypatch):
+        class BrokenStdout:
+            def write(self, _text):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+
+        monkeypatch.setattr("sys.stdout", BrokenStdout())
+
+    def test_exits_with_the_sigpipe_code_and_says_nothing(self, make_run, monkeypatch, capsys):
+        run = make_run()
+        self._broken_stdout(monkeypatch)
+
+        code = main(["report", "--run", str(run), "--format", "csv"])
+
+        assert code == EXIT_BROKEN_PIPE
+        assert capsys.readouterr().err == ""
+
+    def test_a_pipe_that_closes_during_the_exit_flush_is_handled_too(
+        self, make_run, monkeypatch, capsys
+    ):
+        # A short report fits in the pipe buffer, so the write succeeds and
+        # only the flush fails. Left to the interpreter that is an
+        # "Exception ignored" line and exit code 120.
+        written: list[str] = []
+
+        class BufferedStdout:
+            def write(self, text):
+                written.append(text)
+
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        run = make_run()
+        monkeypatch.setattr("sys.stdout", BufferedStdout())
+
+        code = main(["report", "--run", str(run), "--format", "csv"])
+
+        assert code == EXIT_BROKEN_PIPE
+        assert written, "nothing was written before the flush failed"
+        assert capsys.readouterr().err == ""
+
+    def test_remaining_output_is_sent_to_devnull(self, make_run, tmp_path, monkeypatch):
+        # The interpreter flushes stdout at shutdown. If that descriptor is
+        # still the dead pipe, the flush complains again -- after we already
+        # decided this was not an error -- so it is redirected away.
+        sink = tmp_path / "sink.txt"
+        handle = sink.open("w")
+        fileno = handle.fileno()
+
+        class BrokenButRealStdout:
+            def write(self, _text):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+
+            def fileno(self):
+                return fileno
+
+        run = make_run()
+        monkeypatch.setattr("sys.stdout", BrokenButRealStdout())
+
+        code = main(["report", "--run", str(run), "--format", "csv"])
+        os.write(fileno, b"this must not reach the file")
+        handle.close()
+
+        assert code == EXIT_BROKEN_PIPE
+        assert sink.read_text() == ""
+
+    def test_the_code_is_distinct_from_a_user_error_and_from_success(self):
+        # 0 success, 2 user error, 141 = 128 + SIGPIPE. Collapsing the third
+        # into either of the first two would make a script unable to tell
+        # "you typed a bad path" from "the reader hung up".
+        assert EXIT_BROKEN_PIPE == 141
 
 
 def test_version_is_reported(capsys):

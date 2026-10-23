@@ -442,6 +442,23 @@ class TestOutDirIsCheckedBeforeTraining:
     def test_an_existing_directory_is_accepted(self, tmp_path):
         assert train_single.out_dir_problem(tmp_path) is None
 
+    def test_a_read_only_out_dir_is_refused_without_training(self, tmp_path, capsys, monkeypatch):
+        parent = tmp_path / "read-only"
+        parent.mkdir()
+        parent.chmod(0o500)
+
+        def fail(**_):
+            raise AssertionError("training ran despite an unwritable --out-dir")
+
+        monkeypatch.setattr(train_single, "run_training", fail)
+        try:
+            code = train_single.main(["--steps", "3", "--out-dir", str(parent / "run")])
+        finally:
+            parent.chmod(0o700)
+
+        assert code == 2
+        assert "not writable" in capsys.readouterr().err
+
     def test_a_failed_write_says_the_measurements_were_not_saved(
         self, tmp_path, capsys, monkeypatch
     ):
