@@ -365,6 +365,12 @@ def out_dir_problem(out_dir: Path) -> str | None:
     Nothing is created here. A directory made up front would be left behind
     empty if the run then failed, and an empty run directory reads as a run
     that measured nothing.
+
+    The writability probe is a convenience, not a guarantee: ``os.access``
+    is bypassed for root and does not reflect NTFS ACLs on Windows, and a
+    permission can change between this check and the write. The real write
+    in :func:`main` still handles ``OSError``, so this only moves the common
+    failure earlier -- it does not replace that handler.
     """
     if out_dir.exists() and not out_dir.is_dir():
         return (
@@ -456,10 +462,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             # The run itself succeeded; say plainly that its artifacts did
             # not survive, so the numbers above are not mistaken for a
             # recorded run.
+            # "may be incomplete", not "were not saved": the three files
+            # are written in sequence, so a failure partway through leaves
+            # some of them. Claiming nothing survived would be as wrong as
+            # claiming the run was recorded.
             print(
                 f"error: the run finished but its artifacts could not be written to "
-                f"{args.out_dir}: {exc.strerror or exc}. The measurements above were "
-                "not saved.",
+                f"{args.out_dir}: {exc.strerror or exc}. This run is not recorded and "
+                "the directory may hold an incomplete artifact set; 'shardscope "
+                "report' will refuse it. Repeat the run.",
                 file=sys.stderr,
             )
             return 2

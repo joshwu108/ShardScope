@@ -15,6 +15,7 @@ import csv
 import dataclasses
 import json
 import math
+import os
 
 import pytest
 import torch
@@ -442,6 +443,10 @@ class TestOutDirIsCheckedBeforeTraining:
     def test_an_existing_directory_is_accepted(self, tmp_path):
         assert train_single.out_dir_problem(tmp_path) is None
 
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses directory permissions, so os.access reports writable",
+    )
     def test_a_read_only_out_dir_is_refused_without_training(self, tmp_path, capsys, monkeypatch):
         parent = tmp_path / "read-only"
         parent.mkdir()
@@ -459,9 +464,7 @@ class TestOutDirIsCheckedBeforeTraining:
         assert code == 2
         assert "not writable" in capsys.readouterr().err
 
-    def test_a_failed_write_says_the_measurements_were_not_saved(
-        self, tmp_path, capsys, monkeypatch
-    ):
+    def test_a_failed_write_says_the_run_is_not_recorded(self, tmp_path, capsys, monkeypatch):
         def explode(*_args, **_kwargs):
             raise OSError(28, "No space left on device")
 
@@ -474,7 +477,10 @@ class TestOutDirIsCheckedBeforeTraining:
 
         assert code == 2
         assert "No space left on device" in captured.err
-        assert "not saved" in captured.err
+        assert "This run is not recorded" in captured.err
+        # Not "nothing was written": the three files go out in sequence, so
+        # a mid-write failure leaves some of them behind.
+        assert "may hold an incomplete artifact set" in captured.err
 
 
 class TestConfigFile:
