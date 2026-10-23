@@ -101,8 +101,15 @@ Drop ``--quiet`` to see a line per step.
 
 Every command exits ``0`` on success, ``2`` for a mistake you can fix (a bad
 path, an invalid config, an unimplemented command), and ``141`` when the
-reader of its stdout pipe hangs up. A non-zero exit never leaves a partial
-run directory or a half-written report behind.
+reader of its stdout pipe hangs up.
+
+A refused command writes nothing: bad arguments, an invalid config and an
+unusable ``--out-dir`` are all caught before the first training step, and a
+report is rendered in full before the output file is opened. The one case
+that can still leave a half-written run directory is a write that fails
+partway through the three artifacts -- a full disk, say. The fixture says so
+and names the directory, and ``shardscope report`` then refuses the
+incomplete run rather than describing it.
 
 The training fixture
 ====================
@@ -301,6 +308,12 @@ Troubleshooting
 ``error: --out-dir <path> exists and is not a directory``
   Raised before the first training step, so nothing is lost. Point
   ``--out-dir`` at a new or existing directory.
+
+``error: the run finished but its artifacts could not be written to <dir>``
+  The measurements are gone -- the run has to be repeated. Usually a full
+  disk or a permission change during the run. The directory may hold a
+  partial artifact triple; ``shardscope report`` refuses it rather than
+  rendering a run that was not fully recorded.
 
 ``error: cannot tell the report format from 'x.pdf'``
   Use an ``.html``, ``.htm``, ``.json`` or ``.csv`` suffix, or pass
