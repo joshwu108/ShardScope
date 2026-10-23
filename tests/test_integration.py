@@ -66,6 +66,39 @@ def _fixture(*args: str) -> subprocess.CompletedProcess[str]:
     return _run([sys.executable, str(TRAIN_SINGLE), *args])
 
 
+def _error_lines(stderr: str) -> list[str]:
+    """The actionable lines a ShardScope process printed, not all of stderr.
+
+    Importing torch can write to stderr before our code runs -- a NumPy ABI
+    mismatch warning, a deprecation -- and that is a property of the
+    installed environment, not of the behaviour under test. Observed for
+    real: torch 2.2 against NumPy 2.x prints a multi-line notice containing
+    the word "Traceback", which would fail a naive
+    ``"Traceback" not in stderr``.
+
+    What distinguishes a clean refusal from a crash is the exit code: our
+    refusals are 2, an unhandled traceback is 1. Every caller asserts the
+    code; these helpers assert the message.
+    """
+    return [line for line in stderr.splitlines() if line.startswith("error: ")]
+
+
+def _last_line(stderr: str) -> str:
+    """The last non-blank line written to stderr."""
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def _assert_refused_with_one_line(completed, *, contains: str) -> None:
+    """Assert ``completed`` refused the project's way: exit 2, one line, no crash."""
+    assert completed.returncode == 2, completed.stderr
+    errors = _error_lines(completed.stderr)
+    assert len(errors) == 1, completed.stderr
+    # The refusal is the last thing printed, so nothing of ours followed it.
+    assert errors[0] == _last_line(completed.stderr)
+    assert contains in errors[0]
+
+
 @pytest.fixture(scope="module")
 def recorded_run(tmp_path_factory) -> Path:
     """One real training run, recorded to disk by the real producer process.
@@ -106,10 +139,12 @@ class TestInstallation:
 
     @requires_install
     def test_an_unknown_command_exits_two_without_a_traceback(self):
+        # argparse writes the usage message, not an "error: " line of ours,
+        # so this asserts the code and the absence of a crash.
         completed = _cli("nope")
 
         assert completed.returncode == 2
-        assert "Traceback" not in completed.stderr
+        assert "invalid choice" in completed.stderr
 
 
 class TestEnvCommand:
@@ -182,9 +217,7 @@ class TestTrainingFixtureProcess:
 
         completed = _fixture("--config", str(config), "--quiet", "--out-dir", str(out_dir))
 
-        assert completed.returncode == 2
-        assert completed.stderr.startswith("error: ")
-        assert "Traceback" not in completed.stderr
+        _assert_refused_with_one_line(completed, contains="must be positive")
         assert "median=" not in completed.stdout
         assert not out_dir.exists()
 
@@ -194,8 +227,7 @@ class TestTrainingFixtureProcess:
 
         completed = _fixture("--steps", "5", "--quiet", "--out-dir", str(occupied))
 
-        assert completed.returncode == 2
-        assert "Traceback" not in completed.stderr
+        _assert_refused_with_one_line(completed, contains="is not a directory")
         # No summary line means the refusal came before the first step, so a
         # mistyped path costs a second rather than a whole run.
         assert "median=" not in completed.stdout
@@ -254,10 +286,8 @@ class TestReportProcess:
 
         completed = _cli("report", "--run", str(tmp_path / "absent"), "--out", str(out))
 
-        assert completed.returncode == 2
+        _assert_refused_with_one_line(completed, contains="no such run directory")
         assert completed.stdout == ""
-        assert "Traceback" not in completed.stderr
-        assert len(completed.stderr.strip().splitlines()) == 1
         assert not out.exists()
 
     @requires_install
@@ -275,7 +305,9 @@ class TestReportProcess:
         stderr = process.stderr.read().decode() if process.stderr else ""
 
         assert process.wait() == 141
-        assert stderr == ""
+        # Nothing of ours, and in particular no complaint about the pipe.
+        assert _error_lines(stderr) == []
+        assert "BrokenPipeError" not in stderr
 
 
 class TestUnimplementedScriptsRefuseCleanly:
@@ -290,11 +322,8 @@ class TestUnimplementedScriptsRefuseCleanly:
     def test_they_exit_two_naming_gate_7_1(self, script):
         completed = _run([sys.executable, str(BENCHMARKS / script)])
 
-        assert completed.returncode == 2
+        _assert_refused_with_one_line(completed, contains="GATE 7.1")
         assert completed.stdout == ""
-        assert "Traceback" not in completed.stderr
-        assert len(completed.stderr.strip().splitlines()) == 1
-        assert "GATE 7.1" in completed.stderr
         assert "not implemented" in completed.stderr
 
     def test_both_name_the_same_blocker(self):
@@ -315,8 +344,6 @@ class TestPendingCommandsRefuseCleanly:
 
         completed = _cli(command, *argv)
 
-        assert completed.returncode == 2
-        assert "GATE" in completed.stderr
-        assert "Traceback" not in completed.stderr
+        _assert_refused_with_one_line(completed, contains="GATE")
         assert not target.exists()
         assert os.listdir(tmp_path) == []
