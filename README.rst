@@ -240,6 +240,10 @@ Repository layout
 Planning documents, design notes, and all Markdown are intentionally
 git-ignored and stay local. Public documentation lives in this file.
 
+Run outputs (``runs/``) and rendered reports (``reports/``) are git-ignored
+as well: both embed the producing machine's paths, device names and library
+versions, and a report is meant to be reviewed before it is shared.
+
 License
 =========
 
