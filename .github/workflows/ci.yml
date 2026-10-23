@@ -40,6 +40,11 @@ jobs:
           . .venv/bin/activate
           python tools/dev.py format-check
 
+      - name: README parses cleanly
+        run: |
+          . .venv/bin/activate
+          python tools/dev.py readme-check
+
       - name: Tests with coverage gate
         run: |
           . .venv/bin/activate
@@ -55,7 +60,7 @@ jobs:
           . .venv/bin/activate
           python tools/dev.py ignore-policy
 
-      - name: Installed CLI and training fixture run
+      - name: Installed CLI, its version, and the report path run
         run: |
           . .venv/bin/activate
           python tools/dev.py smoke

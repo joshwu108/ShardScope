@@ -21,6 +21,7 @@ own environment cannot tell you the environment is broken.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -144,6 +145,43 @@ def check_bootstrap() -> None:
         )
 
 
+def check_readme() -> None:
+    """README.rst must parse cleanly with no warnings.
+
+    It is the project's only public document *and* the package's
+    ``readme``, so a malformed directive is both a broken install page and a
+    broken doc. docutils is a dev dependency; a missing one is reported as a
+    missing dependency rather than silently skipped, because a check that
+    quietly does nothing is worse than no check.
+    """
+    readme = ROOT / "README.rst"
+    argv = [*PY, "-m", "docutils", "--report=warning", "--halt=warning", str(readme), os.devnull]
+    print(f"$ {' '.join(argv)}", flush=True)
+    completed = _capture(argv)
+    if completed.returncode == 0:
+        print(f"ok: {readme.name} parses with no warnings")
+        return
+    if "No module named docutils" in completed.stderr:
+        raise CheckFailed(
+            'docutils is not installed. Install the dev extras: uv pip install -e ".[dev]"'
+        )
+    raise CheckFailed(
+        f"{readme.name} does not parse cleanly:\n{completed.stdout}{completed.stderr}".strip()
+    )
+
+
+def _installed_version() -> str:
+    """The version of the shardscope distribution this interpreter imports."""
+    argv = [*PY, "-c", "from importlib.metadata import version; print(version('shardscope'))"]
+    completed = _capture(argv)
+    if completed.returncode != 0:
+        raise CheckFailed(
+            "the shardscope distribution is not installed for this interpreter:\n"
+            f"{completed.stdout}{completed.stderr}".strip()
+        )
+    return completed.stdout.strip()
+
+
 def check_smoke() -> None:
     """The installed console script, the fixture, and the report path all run.
 
@@ -152,11 +190,26 @@ def check_smoke() -> None:
     renders it. A unit test can pass against a fixture that no producer
     writes; this cannot.
     """
-    if shutil.which("shardscope") is None:
+    script = shutil.which("shardscope")
+    if script is None:
         raise CheckFailed(
             "the 'shardscope' console script is not on PATH. Install the package"
             ' first: uv pip install -e ".[dev]"'
         )
+
+    # The console script and the interpreter's import must resolve to the
+    # same installed distribution. A stale editable install, or another
+    # shardscope earlier on PATH, is invisible to every in-process test --
+    # they import the package directly and so can never disagree.
+    expected = f"shardscope {_installed_version()}"
+    reported = _capture([script, "--version"]).stdout.strip()
+    if reported != expected:
+        raise CheckFailed(
+            f"the console script at {script} reports {reported!r} but this "
+            f"interpreter imports {expected!r}. Reinstall with "
+            'uv pip install -e ".[dev]" and check PATH for another shardscope.'
+        )
+    print(f"ok: {script} reports {reported}")
     with tempfile.TemporaryDirectory(prefix="shardscope-smoke-") as scratch:
         run_dir = Path(scratch) / "smoke-run"
         report = Path(scratch) / "smoke-report.html"
@@ -209,9 +262,10 @@ CHECKS: tuple[Check, ...] = (
         "pytest with the 80% coverage gate",
         argv=(*PY, "-m", "pytest", "-q", "--cov", "--cov-report=term-missing"),
     ),
+    Check("readme-check", "README.rst parses with no docutils warnings", run=check_readme),
     Check("bootstrap-check", "commit skill regenerates from tracked sources", run=check_bootstrap),
     Check("ignore-policy", "Markdown/planning/secrets stay out of git", run=check_ignore_policy),
-    Check("smoke", "installed CLI and training fixture run", run=check_smoke),
+    Check("smoke", "installed CLI, its version, and the report path run", run=check_smoke),
     # Developer conveniences; not part of the CI sequence.
     Check(
         "test", "pytest without the coverage gate", argv=(*PY, "-m", "pytest", "-q"), in_ci=False

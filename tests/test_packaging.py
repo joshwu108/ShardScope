@@ -70,6 +70,17 @@ def test_ci_matrix_only_tests_supported_python_versions(pyproject):
     assert max(supported) in matrix, "CI does not test the newest supported Python"
 
 
+def test_the_dev_extra_declares_every_tool_a_ci_gate_shells_out_to(pyproject):
+    # A gate that cannot run after `uv pip install -e ".[dev]"` is a gate
+    # that fails for the wrong reason, which trains people to ignore it.
+    declared = {
+        re.split(r"[<>=!;\s]", entry, maxsplit=1)[0]
+        for entry in pyproject["project"]["optional-dependencies"]["dev"]
+    }
+
+    assert {"pytest", "pytest-cov", "ruff", "docutils"} <= declared
+
+
 def test_every_marker_the_suite_relies_on_is_declared(pyproject):
     # --strict-markers turns an undeclared marker into an error; naming the
     # expected set here makes that failure legible.

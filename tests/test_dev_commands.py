@@ -38,7 +38,9 @@ class TestRegistry:
     def test_the_ci_sequence_is_exactly_the_in_ci_checks_in_order(self):
         assert tuple(c.name for c in dev.CHECKS if c.in_ci) == dev.CI_SEQUENCE
 
-    @pytest.mark.parametrize("name", ["lint", "format-check", "cov", "ignore-policy", "smoke"])
+    @pytest.mark.parametrize(
+        "name", ["lint", "format-check", "readme-check", "cov", "ignore-policy", "smoke"]
+    )
     def test_the_gates_that_must_run_in_ci_are_in_the_ci_sequence(self, name):
         assert name in dev.CI_SEQUENCE
 
@@ -83,6 +85,75 @@ class TestCiParity:
         assert "ruff check ." not in text
         assert "pytest -q" not in text
         assert "git check-ignore" not in text
+
+
+class TestReadmeGate:
+    """README.rst is the package's readme and the only public document."""
+
+    def test_the_real_readme_parses(self):
+        dev.check_readme()
+
+    def test_a_malformed_readme_fails_with_the_parser_output(self, tmp_path, monkeypatch):
+        (tmp_path / "README.rst").write_text(
+            "Title\n=====\n\n.. code-block:: console\n\nno content block\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(dev, "ROOT", tmp_path)
+
+        with pytest.raises(dev.CheckFailed) as caught:
+            dev.check_readme()
+
+        assert "does not parse cleanly" in str(caught.value)
+        assert "code-block" in str(caught.value)
+
+    def test_a_missing_docutils_is_reported_as_a_missing_dependency(self, monkeypatch):
+        # Not as a README problem, and never as a silent pass: a gate that
+        # quietly does nothing is worse than no gate.
+        def capture(_argv, **_kwargs):
+            return _Completed(returncode=1, stdout="", stderr="No module named docutils")
+
+        monkeypatch.setattr(dev, "_capture", capture)
+
+        with pytest.raises(dev.CheckFailed, match="docutils is not installed"):
+            dev.check_readme()
+
+
+class TestInstalledScriptCheck:
+    """The console script and the interpreter must be the same install."""
+
+    def test_a_version_mismatch_is_refused(self, monkeypatch):
+        monkeypatch.setattr(dev.shutil, "which", lambda _name: "/somewhere/bin/shardscope")
+        monkeypatch.setattr(dev, "_installed_version", lambda: "9.9.9")
+        monkeypatch.setattr(
+            dev,
+            "_capture",
+            lambda _argv, **_kwargs: _Completed(returncode=0, stdout="shardscope 0.0.1\n"),
+        )
+
+        with pytest.raises(dev.CheckFailed) as caught:
+            dev.check_smoke()
+
+        message = str(caught.value)
+        assert "shardscope 0.0.1" in message
+        assert "shardscope 9.9.9" in message
+
+    def test_an_uninstalled_package_is_named_as_such(self, monkeypatch):
+        monkeypatch.setattr(
+            dev,
+            "_capture",
+            lambda _argv, **_kwargs: _Completed(
+                returncode=1, stdout="", stderr="No module named shardscope"
+            ),
+        )
+
+        with pytest.raises(dev.CheckFailed, match="not installed for this interpreter"):
+            dev._installed_version()
+
+    def test_a_missing_console_script_says_how_to_install(self, monkeypatch):
+        monkeypatch.setattr(dev.shutil, "which", lambda _name: None)
+
+        with pytest.raises(dev.CheckFailed, match="not on PATH"):
+            dev.check_smoke()
 
 
 class TestIgnorePolicy:
@@ -165,7 +236,7 @@ class TestCli:
 class _Completed:
     """Minimal stand-in for subprocess.CompletedProcess."""
 
-    def __init__(self, returncode: int, stdout: str) -> None:
+    def __init__(self, returncode: int, stdout: str, stderr: str = "") -> None:
         self.returncode = returncode
         self.stdout = stdout
-        self.stderr = ""
+        self.stderr = stderr
