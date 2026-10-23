@@ -153,6 +153,16 @@ def check_smoke() -> None:
         ["shardscope", "--version"],
         ["shardscope", "env"],
         [*PY, "examples/train_single.py", "--steps", "3", "--device", "cpu", "--quiet"],
+        # Also exercises --config and flag-over-config precedence.
+        [
+            *PY,
+            "examples/train_single.py",
+            "--config",
+            "examples/configs/cpu_baseline.json",
+            "--steps",
+            "3",
+            "--quiet",
+        ],
     ):
         print(f"$ {' '.join(argv)}", flush=True)
         completed = _capture(argv)

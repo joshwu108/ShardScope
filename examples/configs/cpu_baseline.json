@@ -1,0 +1,11 @@
+{
+  "_comment": "Single-device CPU baseline. These values are the fixture's current DEFAULTS, not settled choices: PRD v2.0 section 13 GATE 1.1 (model shape and batch size) and GATE 1.2 (data residency) are open student decisions.",
+  "steps": 100,
+  "batch_size": 64,
+  "samples": 2048,
+  "seed": 0,
+  "learning_rate": 0.01,
+  "device": "cpu",
+  "data_residency": "host",
+  "synchronize": true
+}

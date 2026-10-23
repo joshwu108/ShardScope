@@ -8,6 +8,7 @@ and every rejection message says enough to fix the file.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -243,3 +244,24 @@ class TestActionableErrors:
     def test_from_mapping_names_a_caller_supplied_source(self):
         with pytest.raises(ConfigError, match="inline-config: unknown config key"):
             from_mapping({"nope": 1}, source="inline-config")
+
+
+class TestShippedExampleConfigs:
+    """Every config shipped under examples/configs/ must actually load."""
+
+    CONFIG_DIR = Path(__file__).resolve().parents[1] / "examples" / "configs"
+
+    def test_the_directory_is_not_empty(self):
+        assert sorted(self.CONFIG_DIR.glob("*.json"))
+
+    @pytest.mark.parametrize("path", sorted(CONFIG_DIR.glob("*.json")), ids=lambda p: p.name)
+    def test_a_shipped_config_validates(self, path):
+        # A documented example that does not load is worse than no example.
+        assert isinstance(load_run_config(path), RunConfig)
+
+    def test_the_cpu_baseline_matches_the_fixture_defaults(self):
+        # It is published as "the defaults"; if it drifts from them the
+        # README is lying about what a baseline run does.
+        config = load_run_config(self.CONFIG_DIR / "cpu_baseline.json")
+
+        assert config == RunConfig(device="cpu")

@@ -22,9 +22,15 @@ Early. Implemented today:
 * ``examples/train_single.py`` -- the tiny fixed-seed training fixture that
   later profiling runs measure. Runs on CPU, MPS or CUDA; emits per-step
   CSV plus an environment and summary sidecar.
+* Run configuration files, validated before anything executes.
 
-Not implemented yet: ``shardscope profile``, ``shardscope report``,
-``shardscope bench``. They exit non-zero rather than pretending to work.
+Declared but **not implemented**: ``shardscope profile``, ``report``,
+``bench`` and ``compare``. Their flags appear in ``--help`` so the target
+interface is visible, but invoking one exits non-zero and names the decision
+it is waiting on. They do not produce partial output or empty run
+directories.
+
+``shardscope --help`` lists the current state of every command.
 
 The training fixture
 ====================
@@ -47,6 +53,47 @@ fast it is:
   transfer exists and can be measured. ``device`` pre-places the whole
   dataset, so no such transfer exists at all. Both paths train on identical
   batches in an identical order, so their step times are comparable.
+
+Run configuration files
+=======================
+
+Any run knob can come from a JSON file instead of a flag, so a recorded run
+can be replayed from its own provenance:
+
+.. code-block:: console
+
+   $ cat examples/configs/cpu_baseline.json
+   {
+     "_comment": "Single-device CPU baseline. ...",
+     "steps": 100,
+     "batch_size": 64,
+     "samples": 2048,
+     "seed": 0,
+     "learning_rate": 0.01,
+     "device": "cpu",
+     "data_residency": "host",
+     "synchronize": true
+   }
+   $ python examples/train_single.py --config examples/configs/cpu_baseline.json --quiet
+
+Keys beginning with ``_`` are ignored, so a config can carry notes.
+Explicitly passed flags override the file; omitted flags do not. The config
+path is recorded in the run's ``environment.json``.
+
+Validation happens before training starts, and says what to fix:
+
+.. code-block:: console
+
+   $ python examples/train_single.py --config bad.json
+   error: bad.json: unknown config key 'devcie'. Did you mean 'device'? Known
+   keys: steps, batch_size, samples, seed, learning_rate, device,
+   data_residency, synchronize.
+   $ echo $?
+   2
+
+Profiler settings -- the capture schedule, the activity set and the phase
+marker names -- are deliberately **not** configurable yet. Those define what
+a measurement means, and are not settled.
 
 Honest-measurement rules
 ========================
@@ -80,11 +127,22 @@ sure the interpreter is ``arm64``; x86_64 Python has no modern PyTorch wheel.
 Development
 ===========
 
+Every check is defined once, in ``tools/dev.py``, and CI invokes the same
+script. "It passed locally" and "it passed in CI" therefore mean the same
+commands ran.
+
 .. code-block:: console
 
-   $ pytest -q                      # unit tests
-   $ pytest -q --cov                # coverage, gate at 80%
-   $ ruff check . && ruff format .  # lint and format
+   $ python tools/dev.py --list     # show every check
+   $ python tools/dev.py test       # pytest, no coverage gate
+   $ python tools/dev.py cov        # pytest with the 80% coverage gate
+   $ python tools/dev.py lint       # ruff check
+   $ python tools/dev.py format     # ruff format (rewrites files)
+   $ python tools/dev.py ci         # the full CI sequence, in order
+
+``ci`` runs lint, format check, tests with the coverage gate, the commit-skill
+bootstrap reproducibility check, the git ignore-policy assertions, and a
+CLI/fixture smoke check.
 
 Tests that need hardware this machine lacks are marked ``gpu`` or
 ``distributed`` and are skipped rather than faked.
@@ -111,11 +169,11 @@ Repository layout
 
 .. code-block:: text
 
-   src/shardscope/     capture, parse, rules, report, cli, env
+   src/shardscope/     cli, env, config, errors; capture/parse/rules/report
    examples/           train_single.py, train_ddp.py
    benchmarks/         unprofiled throughput harness and comparisons
    tests/              unit and integration tests
-   tools/              tracked bootstrap and safe-commit helpers
+   tools/              dev.py (all checks), bootstrap and safe-commit helpers
 
 Planning documents, design notes, and all Markdown are intentionally
 git-ignored and stay local. Public documentation lives in this file.
