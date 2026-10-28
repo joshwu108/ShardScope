@@ -37,8 +37,8 @@ PY = [sys.executable]
 
 #: Paths that must be ignored by git, with the reason each one matters.
 MUST_BE_IGNORED = {
-    "planning/ShardScope_PRD.md": "planning documents stay local (PRD v2.0 section 13.2)",
-    "planning/notes/scratch.md": "all Markdown stays local (PRD v2.0 section 13.2)",
+    "planning/ShardScope_PRD.md": "planning documents stay local",
+    "planning/notes/scratch.md": "Markdown working documents stay local",
     ".agents/skills/commit/SKILL.md": "the generated commit skill is regenerable, not tracked",
     ".shardscope-commit-auth.json": "local commit authorization is never shared",
     "runs/baseline/steps.csv": "run artifacts are machine-specific and regenerable",
@@ -95,8 +95,8 @@ def ignore_policy_failures(capture: Callable[..., Any] = _capture) -> list[str]:
     tracked = capture(["git", "ls-files", *MUST_NOT_BE_TRACKED]).stdout.split()
     if tracked:
         failures.append(
-            "these paths are tracked but the policy forbids it (needs the owner's"
-            " approval to 'git rm --cached'): " + ", ".join(sorted(tracked))
+            "these tracked paths must remain local; review their removal from the index: "
+            + ", ".join(sorted(tracked))
         )
 
     for path in MUST_BE_TRACKED:
@@ -118,8 +118,8 @@ def check_bootstrap() -> None:
     """The commit skill must regenerate byte-identically from tracked sources.
 
     Exit code 3 from the bootstrap means "written, but the reference skill at
-    ~/beacon-climb is absent" -- an honest, expected state (PRD v2.0 section
-    13.1), not a failure. Any other non-zero code is a real problem.
+    ~/beacon-climb is absent". Generation still succeeds in this state.
+    Any other non-zero code is a real problem.
     """
     script = [*PY, "tools/bootstrap_commit_skill.py"]
     print(f"$ {' '.join(script)}", flush=True)

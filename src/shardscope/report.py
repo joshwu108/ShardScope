@@ -1,24 +1,12 @@
-"""Report rendering: HTML / JSON / CSV views over a loaded run.
+"""Render HTML, JSON and CSV views of recorded run artifacts.
 
-Rendering is pure formatting over already-loaded artifacts. It adds no
-analysis, computes no statistic the run did not record, and labels every
-figure with whether the run it came from was profiled, so a diagnostic
-number is never mistaken for a throughput result (requirement SS-04).
+Rendering adds no measurements or statistics. Profiling status remains attached
+to the recorded values so diagnostic timings cannot be mistaken for throughput.
 
-The three views are deliberately different shapes of the same facts:
-
-``html``
-    the readable document -- provenance, what the run does and does not
-    record, the statistics it wrote, and its per-step rows;
-``json``
-    the same run plus the per-field availability statuses, round-trippable
-    back into a :class:`~shardscope.artifacts.RunArtifacts`;
-``csv``
-    the per-step rows exactly as the producer wrote them.
-
-Scope boundary: all three render the artifact triple
-``examples/train_single.py`` writes. The profiled per-step schema is GATE
-3.1/3.2 and has no loader yet, so it has no renderer here either.
+HTML includes provenance, field availability, recorded summaries and step rows.
+JSON preserves a loadable run with availability metadata. CSV preserves the
+producer's per-step representation. Unsupported profiled schemas are rejected
+by the artifact reader before rendering.
 """
 
 from __future__ import annotations

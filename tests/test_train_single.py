@@ -1,12 +1,8 @@
-"""Tests for the training fixture (requirement SS-01).
+"""Tests for the training fixture.
 
-What SS-01 actually demands, and therefore what these tests pin down:
-a tiny, reproducible PyTorch training example with fixed-seed synthetic
-input, able to run ~100 iterations and report per-step wall-clock time.
-
-Reproducibility is the load-bearing property. Every later ShardScope claim
-is a comparison between two runs, and a comparison is meaningless if the
-fixture itself drifts between runs.
+The fixture uses fixed-seed synthetic input, supports bounded training runs,
+and reports per-step wall-clock time. Repeated runs must preserve the input
+sequence and loss trajectory so timing comparisons use the same workload.
 """
 
 from __future__ import annotations
@@ -73,7 +69,7 @@ def test_model_maps_a_batch_to_class_logits():
 
 
 def test_model_is_small_enough_to_profile_quickly():
-    # PRD v2.0 section 5, SS-01: a *small* training example. Keeping this
+    # The training fixture must stay small. Keeping this
     # bounded keeps trace files and step times in the profiler's range.
     model = train_single.build_model(seed=0)
     parameters = sum(p.numel() for p in model.parameters())
@@ -148,8 +144,7 @@ def test_different_seeds_produce_different_loss_trajectories():
 
 @pytest.mark.parametrize("residency", ["host", "device"])
 def test_both_data_residency_modes_run(residency):
-    # GATE 1.2 is deliberately left open: both are implemented so the choice
-    # can be settled by measurement rather than by assumption.
+    # Both residency modes must preserve the requested placement policy.
     records = train_single.run_training(
         steps=3, batch_size=8, device="cpu", seed=0, data_residency=residency
     )
@@ -344,7 +339,7 @@ class TestMain:
         assert (tmp_path / "summary.json").is_file()
 
     def test_written_environment_records_that_the_run_was_not_profiled(self, tmp_path, capsys):
-        # Requirement SS-04: an artifact must say which side of the
+        # Measurement classification: an artifact must say which side of the
         # profiled/unprofiled split it came from.
         train_single.main(
             ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
@@ -487,7 +482,7 @@ class TestOutDirIsCheckedBeforeTraining:
 
 
 class TestConfigFile:
-    """``--config`` (PRD v2.0 section 11) and its precedence over flags."""
+    """Config loading and explicit CLI flag precedence."""
 
     @staticmethod
     def _config(tmp_path, payload) -> str:
@@ -557,7 +552,7 @@ class TestConfigFile:
 
     def test_the_written_environment_records_the_config_file_used(self, tmp_path, capsys):
         # Provenance: a replayed run must be traceable back to the file that
-        # described it (PRD v2.0 section 4, "Run contract").
+        # described it.
         path = self._config(tmp_path, {"steps": 2, "device": "cpu"})
         out_dir = tmp_path / "run"
 

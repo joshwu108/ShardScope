@@ -63,8 +63,7 @@ class ValidationError(ShardScopeError):
 class BlockedOnDecisionError(ShardScopeError):
     """A command exists as an interface target but cannot run yet.
 
-    Raised where a feature is blocked on a decision the owner has not made (PRD
-    v2.0 section 13 approval gate) rather than on unwritten plumbing. The
+    Raised when a required measurement contract has not been defined. The
     message names the blocking decision so the gap is legible instead of
     looking like a crash.
     """

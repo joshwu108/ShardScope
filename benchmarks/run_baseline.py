@@ -1,11 +1,8 @@
-"""Warm, UNPROFILED throughput benchmark (requirement SS-04 / SS-06).
+"""Unprofiled throughput benchmark entry point.
 
-Status: STUB.
-
-This script must never enable torch.profiler: profiling overhead would make
-its steps/s and examples/s numbers unusable as before/after evidence.
-It records warmup, repeats, median and p95 step time, examples/s and peak
-VRAM alongside the environment snapshot from ``shardscope.env``.
+Not implemented. Requires defined warmup, repeat and variance criteria before
+step rates, examples per second or peak memory can be reported. Benchmark runs
+must never enable torch.profiler because its overhead distorts throughput.
 """
 
 from __future__ import annotations
@@ -17,7 +14,7 @@ import sys
 #: two spellings of it would eventually disagree.
 BLOCKED_ON = (
     "the benchmark methodology -- warmup count, repeat count and the test used "
-    "to call a difference real (GATE 7.1) are owner decisions"
+    "to distinguish a change from noise remain undefined"
 )
 
 

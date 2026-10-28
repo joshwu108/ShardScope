@@ -1,5 +1,5 @@
 #!/bin/bash
-# Keep the wake assertion scoped to Claude's process lifetime.
+# Scope the wake assertion to the child process lifetime.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,7 +46,7 @@ echo "Session log: $LOG"
 echo "Permission checks are bypassed for this run, as requested."
 echo "Keep this terminal open. The wake assertion ends when Claude exits."
 
-# Preserve Claude's failure status even though tee is the last pipeline command.
+# Preserve the child exit status through the logging pipeline.
 set +e
 caffeinate -dims claude \
     --dangerously-skip-permissions \

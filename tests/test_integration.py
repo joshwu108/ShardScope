@@ -204,7 +204,7 @@ class TestTrainingFixtureProcess:
     def test_the_recorded_run_says_it_was_not_profiled(self, recorded_run):
         extra = json.loads((recorded_run / "environment.json").read_text(encoding="utf-8"))["extra"]
 
-        # Requirement SS-04: an artifact must say which side of the
+        # Measurement classification: an artifact must say which side of the
         # profiled/unprofiled split it came from, and `profiled` must be a
         # recorded false rather than a missing key read as one.
         assert extra["profiled"] is False
@@ -319,10 +319,10 @@ class TestUnimplementedScriptsRefuseCleanly:
     """
 
     @pytest.mark.parametrize("script", ["run_baseline.py", "compare.py"])
-    def test_they_exit_two_naming_gate_7_1(self, script):
+    def test_they_exit_two_naming_the_missing_benchmark_methodology(self, script):
         completed = _run([sys.executable, str(BENCHMARKS / script)])
 
-        _assert_refused_with_one_line(completed, contains="GATE 7.1")
+        _assert_refused_with_one_line(completed, contains="benchmark methodology")
         assert completed.stdout == ""
         assert "not implemented" in completed.stderr
 
@@ -344,7 +344,9 @@ class TestPendingCommandsRefuseCleanly:
 
         completed = _cli(command, *argv)
 
-        _assert_refused_with_one_line(completed, contains="GATE")
+        _assert_refused_with_one_line(
+            completed, contains="contract" if command == "profile" else "methodology"
+        )
         assert not target.exists()
         assert os.listdir(tmp_path) == []
 

@@ -204,7 +204,7 @@ def validate_run(path: str | Path) -> ValidationResult:
         warnings.append(
             f"{ENVIRONMENT_JSON} does not record extra.profiled, so whether a profiler was "
             "attached is unknown. The step times cannot be classed as diagnostic or as "
-            "throughput figures (requirement SS-04)."
+            "throughput figures (measurement classification)."
         )
 
     synchronized = _distinct(row.synchronized for row in run.steps)

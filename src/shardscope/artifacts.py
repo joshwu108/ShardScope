@@ -1,28 +1,11 @@
-"""Discover, load and validate the artifacts a ShardScope run writes.
+"""Discover, validate and serialize recorded training artifacts.
 
-A run directory is the unit every later stage consumes:
+A run contains ``steps.csv`` and ``environment.json``, with an optional
+``summary.json``. The reader accepts the single-device fixture schema;
+unsupported profiled columns are rejected rather than silently discarded.
 
-    runs/<run_id>/steps.csv          per-step records (requirement SS-03)
-    runs/<run_id>/environment.json   provenance (PRD v2.0 section 4)
-    runs/<run_id>/summary.json       descriptive statistics, as produced
-
-Scope boundary, deliberately narrow: this module understands exactly the
-artifact triple ``examples/train_single.py`` already writes. The *profiled*
-per-step schema -- ``data_wait_ms``, ``h2d_copy_ms`` and friends -- is an
-open owner decision (GATE 3.1, GATE 3.2), so there is no loader for it
-here. A CSV carrying those columns is **refused**, not silently narrowed to
-the columns this module knows: quietly dropping a measured column is how a
-report comes to describe a run that did not happen.
-
-Two rules the validation follows:
-
-* Missing is missing. An absent ``summary.json`` loads as ``None`` and an
-  unrecorded ``profiled`` flag reads as ``None``; neither becomes ``0`` or
-  ``False`` (PRD v2.0 section 8 "Guardrails").
-* Provenance is preserved verbatim. ``environment.json`` is kept as the
-  mapping it was written as, including keys this version has never heard of,
-  so a report cannot silently shed the metadata that makes two runs
-  comparable.
+Missing summaries and profiling flags remain unknown. Provenance mappings retain
+unrecognized keys so serialization does not discard reproducibility metadata.
 """
 
 from __future__ import annotations
@@ -76,14 +59,12 @@ STEP_COLUMNS = (
 _TRUE_VALUES = frozenset({"true", "1"})
 _FALSE_VALUES = frozenset({"false", "0"})
 
-#: Named in the error for an unrecognized column, so the reader learns that
-#: the column belongs to a schema nobody has approved yet rather than
-#: thinking this loader is simply out of date.
+#: Explain unsupported metric columns without silently discarding data.
 _UNKNOWN_COLUMN_HINT = (
     "This loader understands only the schema examples/train_single.py writes. The profiled "
-    "per-step schema (data_wait_ms, h2d_copy_ms, ...) is still an open "
-    "decision -- GATE 3.1 (which fields are measured versus derived) and "
-    "GATE 3.2 (what data_wait_ms means operationally) -- so there is no "
+    "per-step metric schema (data_wait_ms, h2d_copy_ms, ...) is not yet defined: "
+    "measured versus derived fields and loader-wait semantics need a contract. "
+    "There is no "
     "reader for it yet, and dropping the column would misreport the run"
 )
 
@@ -176,7 +157,7 @@ class RunArtifacts:
     def profiled(self) -> bool | None:
         """Whether this run was profiled; ``None`` when it was not recorded.
 
-        ``None`` is not ``False``. Requirement SS-04 turns on the difference:
+        ``None`` is not ``False``. The distinction affects measurement classification:
         a profiled step time must never be quoted as throughput, and a run
         whose profiling status was never written down cannot be declared
         safe to quote.
@@ -311,8 +292,8 @@ def load_run(path: str | Path) -> RunArtifacts:
     environment_path = run_dir / ENVIRONMENT_JSON
     if not environment_path.is_file():
         raise ArtifactError(
-            f"{run_dir} has no {ENVIRONMENT_JSON}. That file is the run's provenance "
-            "(PRD v2.0 section 4): without it there is no record of the machine, "
+            f"{run_dir} has no {ENVIRONMENT_JSON}. That file is the run's provenance; "
+            "without it there is no record of the machine, "
             "versions or settings behind these numbers, and nothing can be judged "
             "comparable to anything. Re-run with --out-dir rather than reporting a "
             "run whose provenance was lost."
@@ -722,7 +703,7 @@ def replace_file_contents(path: str | Path, text: str) -> Path:
       the current umask, not those of the file it replaced. The temporary
       file is opened with ``os.open`` rather than :mod:`tempfile` for that
       reason: ``tempfile`` creates ``0600`` files, which would turn a shared
-      report into an owner-only one.
+      report into a file with private permissions.
     * ``newline=""`` and UTF-8, so the bytes on disk are the rendered text.
     * A symlink at ``path`` is replaced by a regular file; whatever it pointed
       at is left alone. Writing *through* a link is how an output path
@@ -809,7 +790,7 @@ def _validated_environment(payload: Any, *, source: str) -> dict[str, Any]:
         if not isinstance(profiled, bool):
             raise ArtifactError(
                 f"{source}: extra.profiled must be true or false, got {profiled!r}. "
-                "Requirement SS-04 depends on this flag, so a value that cannot be "
+                "Measurement classification depends on this flag, so a value that cannot be "
                 "read is refused rather than guessed."
             )
 

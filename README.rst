@@ -207,15 +207,14 @@ What the report will not do:
 * It computes nothing. Every number in it came from an artifact in the run
   directory. ``summary.json`` is shown as produced; if it is absent, the
   report says so instead of recomputing a replacement.
-* It never fills a gap with zero. Each core report field from the PRD gets
-  one of three states: *recorded*, *not recorded* (nothing captured it, and
-  where a decision is pending the text names the open GATE), or
+* It never fills a gap with zero. Each report field gets one of three
+  states: *recorded*, *not recorded* (nothing captured it, and
+  the text identifies missing capture or analysis dependencies), or
   ``not_observed`` (this run's own environment could not have produced it --
   no CUDA device for kernel activity, fewer than two for collectives, no
   per-step host-to-device copy under ``--data-residency device``).
-* It attaches no diagnosis, threshold or confidence label. Those are open
-  decisions, and a report that invented one would be putting words in the
-  author's mouth.
+* It attaches no diagnosis, threshold or confidence label. Those measurement
+  contracts are not yet defined; rendering does not infer replacements.
 * It does not reconcile artifacts that disagree. The per-step row count and
   ``summary.json``'s ``steps`` are shown side by side, and a mismatch is
   flagged rather than quietly resolved.
@@ -436,7 +435,7 @@ Local commit workflow
 =====================
 
 Automated local commits are opt-in and run through a guarded helper. After
-cloning, regenerate the git-ignored agent commit skill:
+cloning, regenerate the local commit workflow:
 
 .. code-block:: console
 
@@ -452,12 +451,11 @@ amends, or force-pushes.
 Two things that look like failures and are not:
 
 * ``bootstrap_commit_skill.py`` exits ``3`` when the reference committing
-  convention named in the PRD is absent from this machine. The skill is
-  still written, carrying a banner that says it was not reconciled. CI
-  treats ``3`` as the expected state rather than papering over it.
+  convention is absent. The workflow is still generated from the local
+  template, with the missing reference noted. CI accepts this status.
 * ``--authorize`` refuses to touch an existing authorization file, and the
   template it creates has ``authorized: false``. Enabling automated commits
-  is a hand edit by the repository owner, never an agent's own decision.
+  requires explicit local configuration of the author identity and authorization.
 
 Repository layout
 =================

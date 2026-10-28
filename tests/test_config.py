@@ -1,9 +1,4 @@
-"""Run-configuration loading and validation.
-
-A config file is provenance for a run (PRD v2.0 section 4, "Run contract").
-These tests pin the two properties that matter: nothing invalid gets through,
-and every rejection message says enough to fix the file.
-"""
+"""Configuration loading, validation and CLI precedence tests."""
 
 from __future__ import annotations
 

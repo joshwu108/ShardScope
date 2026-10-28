@@ -1,12 +1,7 @@
-"""Report rendering: availability, escaping, round trips, no-fabrication.
+"""Report availability, escaping and serialization tests.
 
-Two invariants carry most of these tests:
-
-* A report labels profiled diagnostic figures separately from unprofiled
-  throughput figures (requirement SS-04), and says so in words.
-* A measurement nobody recorded is rendered as absent, with the reason --
-  never as 0, never as an empty cell that reads like 0 (PRD v2.0 section 8
-  "Guardrails").
+Reports distinguish diagnostic timings from throughput measurements and show
+missing measurements explicitly rather than substituting numeric values.
 """
 
 from __future__ import annotations
@@ -51,7 +46,7 @@ def _with_extra(**items):
 
 
 class TestFieldAvailability:
-    def test_every_prd_core_report_field_gets_a_status(self, make_run):
+    def test_every_core_report_field_gets_a_status(self, make_run):
         run = load_run(make_run())
 
         assert tuple(status.field for status in field_statuses(run)) == REPORT_FIELDS
@@ -81,11 +76,14 @@ class TestFieldAvailability:
         assert status.state in (NOT_RECORDED, NOT_OBSERVED)
         assert len(status.detail) > 20, status.detail
 
-    @pytest.mark.parametrize("field", ["data_wait_ms", "suspected_bottleneck"])
-    def test_a_field_blocked_on_a_decision_names_the_gate(self, make_run, field):
-        # "Unimplemented" and "waiting on a decision the owner has not made" are
+    @pytest.mark.parametrize(
+        ("field", "dependency"),
+        [("data_wait_ms", "measurement contract"), ("suspected_bottleneck", "thresholds")],
+    )
+    def test_unavailable_analysis_names_the_missing_dependency(self, make_run, field, dependency):
+        # Missing implementations and undefined measurement contracts are
         # different states; the report must not blur them.
-        assert "GATE" in _status(load_run(make_run()), field).detail
+        assert dependency in _status(load_run(make_run()), field).detail
 
     def test_gpu_activity_is_not_observed_when_the_run_recorded_no_cuda_device(self, make_run):
         status = _status(load_run(make_run()), "gpu_activity")
@@ -106,7 +104,7 @@ class TestFieldAvailability:
 
         # The host could have produced kernel activity; nothing captured it.
         assert status.state == NOT_RECORDED
-        assert "GATE 2" in status.detail
+        assert "capture is unimplemented" in status.detail
 
     def test_collectives_are_not_observed_on_a_host_that_cannot_run_ddp(self, make_run):
         environment = {
@@ -154,7 +152,7 @@ class TestFieldAvailability:
         status = _status(run, "h2d_copy_ms")
 
         assert status.state == NOT_OBSERVED
-        assert "GATE 1.2" in status.detail
+        assert "data residency" in status.detail
         # Structurally absent is not zero milliseconds.
         assert "0 ms" not in status.detail
 
@@ -277,7 +275,7 @@ class TestHtmlReport:
         html = render_html(load_run(make_run(environment=_with_extra(profiled=True))))
 
         assert "profiled" in html.lower()
-        assert "SS-04" in html
+        assert "must not be quoted as throughput results" in html
 
     def test_an_unknown_profiling_status_is_not_rendered_as_unprofiled(self, make_run):
         extra = {k: v for k, v in GOOD_ENVIRONMENT["extra"].items() if k != "profiled"}

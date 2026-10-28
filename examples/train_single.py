@@ -1,37 +1,15 @@
-"""Tiny single-device training loop -- the fixture every ShardScope run profiles.
+"""Reproducible single-device training fixture with fixed-seed synthetic input.
 
-Requirement SS-01: a tiny, reproducible PyTorch training example with
-fixed-seed synthetic input.
+Dataset generation uses a dedicated ``torch.Generator`` and model initialization
+uses ``fork_rng`` so neither changes global RNG state. Batches follow the same
+seeded permutation in both data-residency modes.
 
-Authorship: agent-written project plumbing under the "Project scaffold,
-examples, CLI, parsers, reports, fixtures" row of PRD v2.0 section 13. It
-contains no custom kernels and no device hot-path optimization; those remain
-owner-authored, and nothing here may be presented as the owner's own GPU work.
+Host residency copies each batch to the device during the step. Device residency
+places the dataset on the device before training, so no per-step host-to-device
+copy exists. The small model and default batch size keep fixture runs bounded.
 
-Design notes the rest of the project depends on:
-
-* ``make_synthetic_dataset`` draws from its own ``torch.Generator`` and
-  ``build_model`` initializes inside ``fork_rng``, so neither disturbs the
-  global RNG. A fixture that silently reseeds would make every later
-  before/after comparison suspect.
-* Batches come from one seeded permutation with wrap-around, so the *same*
-  examples are seen in the same order regardless of where the data lives.
-  That is what makes the two ``--data-residency`` modes comparable.
-* ``.item()`` on the loss forces a device synchronize, so it is called only
-  after the step timer stops. Otherwise ``--no-sync`` would secretly
-  synchronize and measure the same thing as ``--sync``.
-
-Open approval gates (PRD v2.0 section 13 approval gate) -- current values are
-defaults, not decisions:
-
-* GATE 1.1 model shape and batch size: the defaults below (a 9,098-parameter
-  CNN, batch 64) are chosen to keep steps and traces small. Replace them if
-  the owner wants a different operating point.
-* GATE 1.2 data residency: deliberately unresolved. ``host`` copies each
-  batch to the device per step, so a host-to-device transfer exists and can
-  be measured; ``device`` pre-places the whole dataset, so no such transfer
-  exists and ``h2d_copy_ms`` is structurally absent. Both run; the owner
-  picks after measuring.
+Loss extraction happens after the timer stops because ``.item()`` synchronizes
+the device. Moving it into the timed region would change ``--no-sync`` semantics.
 """
 
 from __future__ import annotations
@@ -95,9 +73,8 @@ def make_synthetic_dataset(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(images, labels)`` drawn from a seed-local generator.
 
-    The data is meaningless by design (PRD v2.0 section 5, SS-01 asks for
-    seeded synthetic input and no accuracy score); only its shape, dtype and
-    reproducibility matter.
+    Synthetic input exercises the training path without an accuracy target.
+    Shape, dtype and reproducibility determine fixture behavior.
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples}")
@@ -245,7 +222,7 @@ def run_training(
 
 
 def step_csv_text(records: Sequence[StepRecord]) -> str:
-    """Render per-step records as CSV text (requirement SS-03, CSV half).
+    """Render per-step records as CSV text.
 
     ``\n`` line endings, explicitly: the csv module defaults to ``\r\n``,
     and ``shardscope.artifacts.steps_csv_text`` -- the reader's rendering,
@@ -278,7 +255,7 @@ def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
     step time rather than an interpolation between two of them.
 
     These come from a *timed* run, not from the warm unprofiled benchmark
-    harness (GATE 7.1, unimplemented), and must not be quoted as throughput
+    harness (benchmark methodology not implemented), and must not be quoted as throughput
     results.
     """
     if not records:
@@ -311,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=None,
-        help="JSON run config (PRD v2.0 section 11); explicit flags below override it",
+        help="JSON run config; explicit flags below override it",
     )
     parser.add_argument("--steps", type=int, default=None, help=f"default {DEFAULT_STEPS}")
     parser.add_argument(

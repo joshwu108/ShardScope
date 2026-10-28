@@ -2,13 +2,12 @@
 """Regenerate the git-ignored local commit skill from tracked sources.
 
 The commit skill lives at ``.agents/skills/commit/SKILL.md``, which the
-project's .gitignore excludes (PRD v2.0 section 13.2 ignores all Markdown).
+project's .gitignore excludes alongside other Markdown working documents.
 This script is the tracked, non-Markdown path that recreates it on a fresh
 checkout from ``tools/commit_skill_template.txt``.
 
-It also reports -- rather than silently assumes -- whether the reference
-committing skill named in the PRD (``~/beacon-climb``) is present on this
-machine.
+It also checks whether the optional reference commit workflow at
+``~/beacon-climb`` is available.
 
 Usage::
 
@@ -25,8 +24,7 @@ from pathlib import Path
 TEMPLATE = Path("tools/commit_skill_template.txt")
 TARGET = Path(".agents/skills/commit/SKILL.md")
 
-#: PRD v2.0 section 13.1 names this as the convention to derive from. Candidate
-#: locations are checked read-only; nothing is ever copied out of them.
+#: Optional reference locations, checked read-only without copying files.
 REFERENCE_CANDIDATES = (
     Path.home() / "beacon-climb" / ".agents" / "skills" / "commit" / "SKILL.md",
     Path.home() / "beacon-climb" / ".claude" / "skills" / "commit" / "SKILL.md",
@@ -35,10 +33,9 @@ REFERENCE_CANDIDATES = (
 )
 
 MISSING_REFERENCE = (
-    "NOT FOUND on this machine. ~/beacon-climb was absent when this skill was "
-    "generated, so the workflow below was derived from the ShardScope PRD "
-    "(section 13.1) alone and has NOT been reconciled with the reference "
-    "convention. Re-run this bootstrap once ~/beacon-climb is available."
+    "Reference workflow NOT FOUND at ~/beacon-climb. Generated from the local "
+    "ShardScope template without reference reconciliation. Re-run the bootstrap "
+    "when the reference becomes available."
 )
 
 
@@ -96,9 +93,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"reference skill: {status}")
     if not found:
         print(
-            "\nPrerequisite not met: the PRD requires reviewing the committing skill at"
-            "\n~/beacon-climb before deriving this project's convention. Supply that"
-            "\ndirectory (or the skill file) and re-run to reconcile.",
+            "\nReference workflow unavailable at ~/beacon-climb."
+            "\nGenerated the local template; exit 3 indicates the missing reference.",
             file=sys.stderr,
         )
         return 3

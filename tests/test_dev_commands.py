@@ -208,7 +208,7 @@ class TestIgnorePolicy:
         assert ".shardscope-commit-auth.json" in dev.MUST_BE_IGNORED
         assert any(path.startswith("runs/") for path in dev.MUST_BE_IGNORED)
         # A rendered report carries the producing machine's paths and
-        # operation names; PRD v2.0 section 11 keeps it local until reviewed.
+        # operation names, so generated reports remain local.
         assert any(path.startswith("reports/") for path in dev.MUST_BE_IGNORED)
 
 

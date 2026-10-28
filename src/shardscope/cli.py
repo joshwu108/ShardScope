@@ -1,28 +1,12 @@
 """Command-line entry point for ShardScope.
 
-Subcommand split mirrors PRD requirement SS-04: diagnostic (profiled) runs
-and throughput (unprofiled) benchmarks are different commands, and their
-numbers are never presented as interchangeable.
+``env`` captures reproducibility metadata, ``validate`` checks recorded run
+artifacts, and ``report`` renders HTML, JSON or CSV without adding measurements.
 
-    shardscope env                 # reproducibility snapshot (implemented)
-    shardscope validate ...        # say whether a run directory can be reported (implemented)
-    shardscope report ...          # render HTML/JSON/CSV from a run (implemented)
-    shardscope profile ...         # bounded profiled diagnostic run (not implemented)
-    shardscope bench ...           # warm, unprofiled throughput run (not implemented)
-    shardscope compare ...         # before/after with variance (not implemented)
-
-``report`` renders the artifacts a run already wrote -- the per-step CSV,
-the provenance dump and the recorded statistics -- and states, field by
-field, what the run does *not* contain and why. It adds no measurement: the
-profiled per-step schema is GATE 3.1/3.2 and has no reader yet, so a CSV
-carrying those columns is refused rather than partially rendered.
-
-``profile``, ``bench`` and ``compare`` are declared but unimplemented. The
-argument names come from PRD v2.0 section 11, so ``--help`` documents the
-agreed interface target; invoking one exits non-zero and names the decision
-it waits on, rather than pretending to work. Memory Lab commands
-(``memory-sweep``, ``memory-report``) are deliberately absent: PRD v2.0
-section 10 gates that whole block on a review that has not happened.
+``profile``, ``bench`` and ``compare`` expose their planned interfaces but exit
+with an explicit dependency message until their measurement contracts are
+implemented. Diagnostic and throughput measurements remain separate commands.
+Memory sweeps are outside the current command interface.
 """
 
 from __future__ import annotations
@@ -67,10 +51,8 @@ class Option:
 class PendingCommand:
     """A command that exists as an interface target but cannot run yet.
 
-    ``blocked_on`` must name the specific open decision, not just say
-    "unimplemented": the difference between "nobody has written this" and
-    "this is waiting on a measurement contract the owner has not settled" is
-    the whole point of the PRD v2.0 section 13 approval gate.
+    ``blocked_on`` names the missing measurement contract or implementation
+    dependency so callers can distinguish unsupported behavior from a crash.
     """
 
     name: str
@@ -95,10 +77,8 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
         name="profile",
         summary="bounded profiled diagnostic run",
         blocked_on=(
-            "the capture contract in src/shardscope/capture.py -- the profiler "
-            "schedule (GATE 2.1), the activity set and extras (GATE 2.2) and the "
-            "record_function marker names every later rule keys off (GATE 2.3) "
-            "are owner decisions"
+            "the capture contract in src/shardscope/capture.py -- profiler schedule, "
+            "activity selection and phase marker names remain undefined"
         ),
         options=(
             _CONFIG_OPTION,
@@ -110,8 +90,7 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
         summary="warm, never-profiled throughput run",
         blocked_on=(
             "the benchmark methodology in benchmarks/run_baseline.py -- warmup count, "
-            "repeat count and the test used to call a difference real (GATE 7.1) are "
-            "owner decisions"
+            "repeat count and statistical significance criteria remain undefined"
         ),
         options=(
             _CONFIG_OPTION,
@@ -122,7 +101,7 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
         name="compare",
         summary="before/after comparison of two unprofiled runs",
         blocked_on=(
-            "the same GATE 7.1 methodology decision as 'bench': without an agreed "
+            "the benchmark methodology used by 'bench': without a defined "
             "variance test this command could only report a percentage it cannot "
             "defend"
         ),
@@ -190,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Render the artifacts a run directory already contains. Shows the "
             "recorded provenance, statistics and per-step rows, and states which "
-            "PRD v2.0 section 5 report fields the run does not contain, with the "
+            "report fields the run does not contain, with the "
             "reason for each. Computes no new measurement."
         ),
     )

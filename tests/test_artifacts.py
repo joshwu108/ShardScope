@@ -3,7 +3,7 @@
 These tests cover the artifact triple ``examples/train_single.py`` already
 writes -- ``steps.csv``, ``environment.json``, ``summary.json`` -- and
 nothing else. The *profiled* per-step schema (``data_wait_ms``,
-``h2d_copy_ms``, ...) is GATE 3.1/3.2 and deliberately has no loader here;
+``h2d_copy_ms``, ...) is the profiled metric schema and deliberately has no loader here;
 the point of ``test_an_unknown_column_is_refused_not_dropped`` is that a
 file carrying those columns is refused rather than silently narrowed.
 """
@@ -59,7 +59,7 @@ class TestLoadStepsCsv:
 
     def test_a_bounded_capture_window_may_start_anywhere(self, tmp_path):
         # A profiled window will not start at step 0; requiring 0..N would
-        # reject a legitimate bounded capture (GATE 2.1).
+        # reject a legitimate bounded capture (bounded capture schedule).
         path = tmp_path / STEPS_CSV
         path.write_text(_csv("10,1.0,2.0,host,True", "11,1.0,2.0,host,True"))
 
@@ -120,7 +120,7 @@ class TestLoadStepsCsv:
             load_steps_csv(path)
 
         assert "data_wait_ms" in str(excinfo.value)
-        assert "GATE 3.1" in str(excinfo.value)
+        assert "metric schema" in str(excinfo.value)
 
     def test_a_duplicated_column_is_refused(self, tmp_path):
         path = tmp_path / STEPS_CSV
@@ -231,7 +231,7 @@ class TestLoadRun:
         assert str(run_dir) in str(excinfo.value)
 
     def test_a_missing_environment_is_refused_as_lost_provenance(self, make_run):
-        # PRD v2.0 section 4: a run without its provenance cannot be judged
+        # A run without provenance cannot be judged
         # comparable to anything, so it must not render as a report.
         with pytest.raises(ArtifactError) as excinfo:
             load_run(make_run(environment=None))
@@ -792,7 +792,7 @@ class TestReplaceFileContents:
 
     def test_the_destination_is_readable_by_others_under_the_default_umask(self, tmp_path):
         # tempfile's helpers create 0600 files; replacing a report with one
-        # would quietly make shared reports owner-only. The destination
+        # would quietly make shared reports unreadable to other users. The destination
         # should look like any file created under the caller's umask.
         if os.name != "posix":
             pytest.skip("permission bits are POSIX-specific")
