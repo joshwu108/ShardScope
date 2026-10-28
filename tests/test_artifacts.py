@@ -842,3 +842,51 @@ class TestProducerBytes:
         run = load_run(out_dir)
 
         assert (out_dir / STEPS_CSV).read_bytes() == steps_csv_text(run.steps).encode("utf-8")
+
+
+class TestJsonParserLimits:
+    """Failures json.loads raises that are not JSONDecodeError.
+
+    CPython refuses an integer literal over 4300 digits with a plain
+    ``ValueError`` and a deeply nested document with ``RecursionError``.
+    Neither is a ShardScopeError, so left alone both reach the user as a
+    traceback instead of naming the damaged file.
+    """
+
+    OVERSIZED = '{"steps": ' + "9" * 5000 + "}"
+    DEEP = "[" * 100_000 + "]" * 100_000
+
+    @pytest.mark.parametrize("artifact", [ENVIRONMENT_JSON, SUMMARY_JSON])
+    @pytest.mark.parametrize("payload", [OVERSIZED, DEEP], ids=["oversized-int", "deep-nesting"])
+    def test_an_unparseable_json_artifact_names_the_file(self, make_run, artifact, payload):
+        run_dir = make_run(**{artifact.removesuffix(".json"): payload})
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_run(run_dir)
+
+        assert artifact in str(excinfo.value)
+
+
+class TestNumericSpellings:
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "1_0,1.0,2.0,host,True",
+            "0,1_0.5,2.0,host,True",
+            "0,1.0,1_0,host,True",
+            "١,1.0,2.0,host,True",
+            "0,1.0,١٠,host,True",
+        ],
+        ids=["int-underscore", "loss-underscore", "time-underscore", "int-arabic", "time-arabic"],
+    )
+    def test_python_only_numeric_spellings_are_refused(self, tmp_path, row):
+        # int() and float() accept underscores and non-ASCII digits. The
+        # producer never writes them, so a cell like 1_0 is a hand edit, and
+        # loading it as 10 would quietly accept a file that is not ours.
+        path = tmp_path / STEPS_CSV
+        path.write_text(_csv("0,1.0,2.0,host,True", row) if not row.startswith("0,") else _csv(row))
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_steps_csv(path)
+
+        assert "row" in str(excinfo.value)

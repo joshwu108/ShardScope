@@ -625,6 +625,7 @@ def _require_representable(value: int | float, *, where: str, column: str) -> No
 
 def _parse_int(value: str, *, where: str, column: str) -> int:
     try:
+        _require_plain_spelling(value)
         return int(value)
     except ValueError as exc:
         raise ArtifactError(
@@ -635,9 +636,21 @@ def _parse_int(value: str, *, where: str, column: str) -> int:
 def _parse_float(value: str, *, where: str, column: str) -> float:
     """Convert one CSV cell to a float; range checks live in _checked_step."""
     try:
+        _require_plain_spelling(value)
         return float(value)
     except ValueError as exc:
         raise ArtifactError(f"{where}: column {column!r} must be a number, got {value!r}.") from exc
+
+
+def _require_plain_spelling(value: str) -> None:
+    """Reject numeric spellings only Python accepts.
+
+    ``int()`` and ``float()`` take ``1_0`` and non-ASCII digits. The
+    producer never writes either, so a cell like that is a hand edit, and
+    loading it as ``10`` would quietly accept a file that is not ours.
+    """
+    if "_" in value or not value.isascii():
+        raise ValueError(f"not a plain ASCII number: {value!r}")
 
 
 def _parse_bool(value: str, *, where: str, column: str) -> bool:
@@ -711,6 +724,10 @@ def replace_file_contents(path: str | Path, text: str) -> Path:
       reason: ``tempfile`` creates ``0600`` files, which would turn a shared
       report into an owner-only one.
     * ``newline=""`` and UTF-8, so the bytes on disk are the rendered text.
+    * A symlink at ``path`` is replaced by a regular file; whatever it pointed
+      at is left alone. Writing *through* a link is how an output path
+      quietly lands on a file the caller never named. For the same reason a
+      hard link to the old file keeps the old contents.
 
     Missing parent directories are created. ``OSError`` propagates: the
     caller knows what the file was for and can say so.
@@ -756,8 +773,16 @@ def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
         raise ArtifactError(f"cannot read {path}: {exc}") from exc
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is one ValueError; an integer literal past
+        # CPython's 4300-digit limit is another, raised as a plain
+        # ValueError with no position.
         raise ArtifactError(f"{path} is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise ArtifactError(
+            f"{path} is nested too deeply to be read. A {label} artifact is a flat "
+            "JSON object; a document this deep is damaged or is not an artifact."
+        ) from exc
     return _require_json_object(payload, source=str(path), label=label)
 
 

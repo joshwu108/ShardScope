@@ -19,7 +19,7 @@ import pytest
 from conftest import GOOD_ENVIRONMENT, GOOD_STEPS_CSV, GOOD_SUMMARY
 from shardscope.cli import PENDING_COMMANDS, main
 from shardscope.errors import ShardScopeError, ValidationError
-from shardscope.validate import ValidationResult, validate_run
+from shardscope.validate import validate_run
 
 HEADER = "step,loss,step_time_ms,data_residency,synchronized"
 
@@ -133,17 +133,18 @@ class TestValidateRun:
             assert statistic not in text
         assert "17.92" not in text  # the fixture's recorded max/first step time
 
-    def test_the_json_view_is_strict_json_even_for_a_damaged_summary(self, make_run):
-        # json.dumps spells nan as the non-standard token NaN; a validation
-        # document for automation must never contain one.
+    def test_a_damaged_recorded_count_does_not_leak_into_the_document_as_a_value(self, make_run):
+        # The result model carries the count only when it is a readable
+        # integer; a nan on disk is described in a warning string, never
+        # emitted as a number (json.dumps would spell it as the non-standard
+        # token NaN).
         result = validate_run(make_run(summary='{"steps": NaN}'))
 
-        text = result.to_json()
+        payload = json.loads(result.to_json())
 
-        assert "NaN" not in text
-        payload = json.loads(text)
         assert payload["ok"] is True
         assert payload["summary"]["steps"] is None
+        assert any("nan" in warning for warning in payload["warnings"])
 
     def test_text_and_json_describe_the_same_result(self, make_run):
         result = validate_run(make_run(summary={**GOOD_SUMMARY, "steps": 99.0}))
@@ -162,8 +163,8 @@ class TestValidateRun:
             result.ok = False  # type: ignore[misc]
 
     def test_a_validation_error_is_a_shardscope_error(self):
+        # The CLI turns only ShardScopeError into an actionable line.
         assert issubclass(ValidationError, ShardScopeError)
-        assert isinstance(ValidationResult, type)
 
 
 class TestValidateCommand:
@@ -228,6 +229,23 @@ class TestValidateCommand:
         assert payload["errors"] == []
         assert payload["steps"]["rows"] == 3
         assert payload["summary"] == {"present": True, "steps": 3, "agrees_with_rows": True}
+
+    def test_json_output_describes_an_absent_summary_as_absent(self, make_run, capsys):
+        # Not {"present": false, "steps": null}: a count key for a file that
+        # does not exist would invite reading null as "no steps".
+        assert main(["validate", "--run", str(make_run(summary=None)), "--format", "json"]) == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["summary"] == {"present": False}
+
+    def test_text_output_names_an_unreadable_recorded_count(self, make_run, capsys):
+        assert main(["validate", "--run", str(make_run(summary={"steps": "three"}))]) == 0
+
+        out = capsys.readouterr().out
+        assert "no readable integer 'steps' count" in out
+        assert "agrees" not in out
+        assert "warning" in out
 
     def test_json_output_for_a_failure_goes_to_stdout_and_exits_two(self, make_run, capsys):
         run_dir = make_run(summary={**GOOD_SUMMARY, "steps": 99.0})

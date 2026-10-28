@@ -125,8 +125,15 @@ def load_run_config(path: str | Path) -> RunConfig:
 
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is one ValueError; an integer literal past
+        # CPython's 4300-digit limit is another, raised with no position.
         raise ConfigError(f"{target} is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise ConfigError(
+            f"{target} is nested too deeply to be read. A config is a flat JSON object "
+            f"with any of: {', '.join(field_names())}."
+        ) from exc
 
     return from_mapping(payload, source=str(target))
 
