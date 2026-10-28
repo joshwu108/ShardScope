@@ -105,11 +105,15 @@ reader of its stdout pipe hangs up.
 
 A refused command writes nothing: bad arguments, an invalid config and an
 unusable ``--out-dir`` are all caught before the first training step, and a
-report is rendered in full before the output file is opened. The one case
-that can still leave a half-written run directory is a write that fails
-partway through the three artifacts -- a full disk, say. The fixture says so
-and names the directory, and ``shardscope report`` then refuses the
-incomplete run rather than describing it.
+report is rendered in full before the output file is opened. Each artifact
+is written to a temporary file beside its destination and swapped in whole,
+so a file is never left half-written. The three swaps are not one
+transaction, though: a failure between them -- a full disk, say -- can leave
+the directory with fewer than three files or, if it already held an earlier
+recording, with files from two runs. The fixture says so and names the
+directory; ``shardscope report`` refuses a missing file and flags a
+step-count disagreement, but cannot tell two complete recordings apart
+beyond that, so treat the directory as unrecorded and repeat the run.
 
 The training fixture
 ====================
@@ -320,10 +324,12 @@ Troubleshooting
 
 ``error: the run finished but its artifacts could not be written to <dir>``
   The run is not recorded and has to be repeated. Usually a full disk or a
-  permission change during the run. The three files are written in
-  sequence, so the directory may hold an incomplete set;
-  ``shardscope report`` refuses such a directory rather than rendering a
-  run that was not fully recorded.
+  permission change during the run. Each file lands whole or not at all,
+  but the three are swapped in one after another, so the directory may
+  hold an incomplete set or -- if it already held an earlier recording --
+  a mix of two runs' files. ``shardscope report`` refuses a missing file
+  and flags a step-count disagreement; it cannot detect a mix that agrees
+  on the count, so do not report from the directory.
 
 ``error: refusing to write the report over <file>: --out names an artifact of the run``
   ``--out`` points at ``steps.csv``, ``environment.json``, ``summary.json``

@@ -347,3 +347,19 @@ class TestPendingCommandsRefuseCleanly:
         _assert_refused_with_one_line(completed, contains="GATE")
         assert not target.exists()
         assert os.listdir(tmp_path) == []
+
+
+class TestRecordedBytes:
+    @requires_install
+    def test_the_csv_view_matches_the_recorded_file_byte_for_byte(self, recorded_run):
+        # Bytes, not text: text-mode capture translates CRLF to LF and would
+        # hide a producer that writes one while the renderer writes the other.
+        completed = subprocess.run(
+            [SHARDSCOPE, "report", "--run", str(recorded_run), "--format", "csv"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout == (recorded_run / "steps.csv").read_bytes()
+        assert b"\r\n" not in completed.stdout

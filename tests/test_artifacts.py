@@ -30,6 +30,7 @@ from shardscope.artifacts import (
     load_steps_csv,
     looks_like_run,
     replace_file_contents,
+    steps_csv_text,
     write_steps_csv,
 )
 from shardscope.errors import ArtifactError, ShardScopeError
@@ -827,3 +828,17 @@ class TestReplaceFileContents:
 
         assert target.read_text() == "mine"
         assert taken.read_text() == "someone else's"
+
+
+class TestProducerBytes:
+    def test_the_recorded_csv_is_byte_identical_to_the_readers_rendering(self, tmp_path):
+        # The promise steps_csv_text makes. Before the producer switched to
+        # "\\n" it held only after universal-newline translation.
+        import train_single
+
+        out_dir = tmp_path / "fixture-run"
+        train_single.main(["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(out_dir)])
+
+        run = load_run(out_dir)
+
+        assert (out_dir / STEPS_CSV).read_bytes() == steps_csv_text(run.steps).encode("utf-8")

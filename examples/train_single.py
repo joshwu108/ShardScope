@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import math
 import os
@@ -244,18 +245,31 @@ def run_training(
     return tuple(records)
 
 
-def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
-    """Write per-step records to ``path`` (requirement SS-03, CSV half)."""
+def step_csv_text(records: Sequence[StepRecord]) -> str:
+    """Render per-step records as CSV text (requirement SS-03, CSV half).
+
+    ``\n`` line endings, explicitly: the csv module defaults to ``\r\n``,
+    and ``shardscope.artifacts.steps_csv_text`` -- the reader's rendering,
+    which ``shardscope report --format csv`` emits -- writes ``\n``. The two
+    have to agree byte for byte or "the CSV view is the recorded file" is
+    only true after newline translation.
+    """
     if not records:
         raise ValueError("refusing to write a step CSV with no records")
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(STEP_CSV_COLUMNS))
-        writer.writeheader()
-        for record in records:
-            writer.writerow(asdict(record))
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=list(STEP_CSV_COLUMNS), lineterminator="\n")
+    writer.writeheader()
+    for record in records:
+        writer.writerow(asdict(record))
+    return buffer.getvalue()
+
+
+def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
+    """Write per-step records to ``path``, replacing any existing file whole."""
+    from shardscope.artifacts import replace_file_contents
+
+    replace_file_contents(path, step_csv_text(records))
 
 
 def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
@@ -389,9 +403,27 @@ def out_dir_problem(out_dir: Path) -> str | None:
 
 
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
+    """Write the artifact triple, each file landing whole or not at all.
+
+    All three documents are rendered before the first byte goes out, and
+    each then replaces its destination through a sibling temporary file
+    (:func:`shardscope.artifacts.replace_file_contents`). The failures that
+    actually happen -- a full disk, a permission that changed during the run
+    -- therefore strike while a temporary file is being written and leave an
+    earlier recording in ``out_dir`` untouched instead of half-overwritten.
+
+    What this is not: a transaction. The three swaps happen one after
+    another, so a failure between them can leave the directory holding
+    fewer than three files, or files from two recordings. ``shardscope
+    report`` refuses a missing file and flags a step-count disagreement, but
+    cannot tell two complete recordings apart beyond that. Closing the gap
+    means a new rule for reusing a run directory (refuse it, or write into a
+    fresh subdirectory), which changes the documented ``--out-dir`` contract
+    and is not decided here.
+    """
+    from shardscope.artifacts import replace_file_contents
     from shardscope.env import capture_environment
 
-    write_step_csv(out_dir / "steps.csv", records)
     environment = capture_environment().with_extra(
         steps=config.steps,
         batch_size=config.batch_size,
@@ -406,10 +438,13 @@ def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) ->
         profiled=False,
         source="examples/train_single.py",
     )
-    (out_dir / "environment.json").write_text(environment.to_json() + "\n", encoding="utf-8")
-    (out_dir / "summary.json").write_text(
-        json.dumps(stats, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    documents = (
+        ("steps.csv", step_csv_text(records)),
+        ("environment.json", environment.to_json() + "\n"),
+        ("summary.json", json.dumps(stats, indent=2, sort_keys=True) + "\n"),
     )
+    for name, text in documents:
+        replace_file_contents(out_dir / name, text)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -461,16 +496,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         except OSError as exc:
             # The run itself succeeded; say plainly that its artifacts did
             # not survive, so the numbers above are not mistaken for a
-            # recorded run.
-            # "may be incomplete", not "were not saved": the three files
-            # are written in sequence, so a failure partway through leaves
-            # some of them. Claiming nothing survived would be as wrong as
-            # claiming the run was recorded.
+            # recorded run. Not "nothing was written": each file lands whole
+            # or not at all, but the three are swapped in one after another,
+            # so a failure between swaps leaves some of them -- possibly
+            # beside an earlier recording's files.
             print(
                 f"error: the run finished but its artifacts could not be written to "
-                f"{args.out_dir}: {exc.strerror or exc}. This run is not recorded and "
-                "the directory may hold an incomplete artifact set; 'shardscope "
-                "report' will refuse it. Repeat the run.",
+                f"{args.out_dir}: {exc.strerror or exc}. This run is not recorded. The "
+                "directory may hold an incomplete artifact set, or a mix of this run's "
+                "files and an earlier recording's; do not report from it. Repeat the run.",
                 file=sys.stderr,
             )
             return 2

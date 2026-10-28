@@ -16,6 +16,7 @@ import dataclasses
 import json
 import math
 import os
+from pathlib import Path
 
 import pytest
 import torch
@@ -478,9 +479,11 @@ class TestOutDirIsCheckedBeforeTraining:
         assert code == 2
         assert "No space left on device" in captured.err
         assert "This run is not recorded" in captured.err
-        # Not "nothing was written": the three files go out in sequence, so
-        # a mid-write failure leaves some of them behind.
-        assert "may hold an incomplete artifact set" in captured.err
+        # Not "nothing was written": the three files are swapped in one
+        # after another, so a failure between swaps leaves some of them
+        # behind -- possibly beside an earlier recording's files.
+        assert "incomplete" in captured.err
+        assert "earlier recording" in captured.err
 
 
 class TestConfigFile:
@@ -584,3 +587,81 @@ def test_mps_usability_probe_returns_a_boolean():
     # Guards against the probe leaking a torch object or raising on a
     # platform without the backend.
     assert isinstance(train_single._mps_is_usable(), bool)
+
+
+class TestRunArtifactsLandWhole:
+    """Each artifact replaces its destination whole, and never as CRLF.
+
+    The reader and ``shardscope report --format csv`` emit ``\\n``; a
+    producer that wrote ``\\r\\n`` made the "byte-identical" promise true
+    only after newline translation. And ``--out-dir`` may be a directory
+    that already holds an earlier recording, so a failed write must leave
+    that recording intact rather than overwrite half of it.
+    """
+
+    def test_the_step_csv_uses_lf_line_endings(self, tmp_path):
+        records = train_single.run_training(steps=2, batch_size=8, device="cpu", seed=0)
+        target = tmp_path / "steps.csv"
+
+        train_single.write_step_csv(target, records)
+
+        raw = target.read_bytes()
+        assert b"\r\n" not in raw
+        assert raw.count(b"\n") == 3
+
+    def test_the_step_csv_text_matches_the_readers_rendering(self, tmp_path):
+        from shardscope.artifacts import load_steps_csv, steps_csv_text
+
+        records = train_single.run_training(steps=3, batch_size=8, device="cpu", seed=0)
+        target = tmp_path / "steps.csv"
+        train_single.write_step_csv(target, records)
+
+        assert target.read_bytes() == steps_csv_text(load_steps_csv(target)).encode("utf-8")
+
+    def test_a_failed_write_preserves_an_earlier_recording(self, tmp_path, capsys, monkeypatch):
+        earlier = {
+            "steps.csv": (
+                "step,loss,step_time_ms,data_residency,synchronized\n0,1.0,2.0,host,True\n"
+            ),
+            "environment.json": '{"earlier": true}\n',
+            "summary.json": '{"steps": 1.0}\n',
+        }
+        for name, text in earlier.items():
+            (tmp_path / name).write_text(text)
+
+        def no_space(_src, _dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", no_space)
+
+        code = train_single.main(
+            ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
+        )
+
+        assert code == 2
+        assert "not recorded" in capsys.readouterr().err
+        for name, text in earlier.items():
+            assert (tmp_path / name).read_text() == text
+        assert sorted(path.name for path in tmp_path.iterdir()) == sorted(earlier)
+
+    def test_the_artifacts_are_rendered_before_any_is_written(self, tmp_path, monkeypatch):
+        # The common failure -- a full disk -- strikes during the write. If
+        # the summary were only rendered after steps.csv had landed, a
+        # rendering failure would leave one new file beside two old ones.
+        written = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            written.append(Path(dst).name)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", spy)
+
+        assert (
+            train_single.main(
+                ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
+            )
+            == 0
+        )
+        assert written == ["steps.csv", "environment.json", "summary.json"]
+        assert sorted(path.name for path in tmp_path.iterdir()) == sorted(written)
