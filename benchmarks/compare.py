@@ -2,7 +2,7 @@
 exceeds observed run-to-run variance (PRD v2.0 section 9, "Statistical
 trust").
 
-Status: STUB (Week 7 deliverable).
+Status: STUB.
 
 A comparison that cannot distinguish the change from noise must say so
 rather than reporting a headline percentage.
@@ -23,8 +23,7 @@ def main() -> int:
     report a percentage it cannot defend.
     """
     print(
-        "error: benchmarks/compare.py is not implemented yet -- it is a Week 7 "
-        f"deliverable. Blocked on: {BLOCKED_ON}",
+        f"error: benchmarks/compare.py is not implemented yet. Blocked on: {BLOCKED_ON}",
         file=sys.stderr,
     )
     return 2

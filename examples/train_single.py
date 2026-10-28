@@ -3,13 +3,12 @@
 Requirement SS-01: a tiny, reproducible PyTorch training example with
 fixed-seed synthetic input.
 
-Authorship: written by the AI agent at the student's request, under the
-"Project plumbing" row of PRD v2.0 section 13 ("Project scaffold, examples,
-CLI, parsers, reports, fixtures"). It contains no custom kernels and no
-device hot-path optimization; those remain student-owned. Nothing here may be
-presented as the student's own GPU work.
+Authorship: agent-written project plumbing under the "Project scaffold,
+examples, CLI, parsers, reports, fixtures" row of PRD v2.0 section 13. It
+contains no custom kernels and no device hot-path optimization; those remain
+owner-authored, and nothing here may be presented as the owner's own GPU work.
 
-Design notes that later weeks depend on:
+Design notes the rest of the project depends on:
 
 * ``make_synthetic_dataset`` draws from its own ``torch.Generator`` and
   ``build_model`` initializes inside ``fork_rng``, so neither disturbs the
@@ -27,11 +26,11 @@ defaults, not decisions:
 
 * GATE 1.1 model shape and batch size: the defaults below (a 9,098-parameter
   CNN, batch 64) are chosen to keep steps and traces small. Replace them if
-  the student wants a different operating point.
+  the owner wants a different operating point.
 * GATE 1.2 data residency: deliberately unresolved. ``host`` copies each
   batch to the device per step, so a host-to-device transfer exists and can
   be measured; ``device`` pre-places the whole dataset, so no such transfer
-  exists and ``h2d_copy_ms`` is structurally absent. Both run; the student
+  exists and ``h2d_copy_ms`` is structurally absent. Both run; the owner
   picks after measuring.
 """
 
@@ -279,7 +278,8 @@ def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
     step time rather than an interpolation between two of them.
 
     These come from a *timed* run, not from the warm unprofiled benchmark
-    Week 3 adds, and must not be quoted as throughput results.
+    harness (GATE 7.1, unimplemented), and must not be quoted as throughput
+    results.
     """
     if not records:
         raise ValueError("refusing to summarize an empty record set")

@@ -83,7 +83,7 @@ class TestFieldAvailability:
 
     @pytest.mark.parametrize("field", ["data_wait_ms", "suspected_bottleneck"])
     def test_a_field_blocked_on_a_decision_names_the_gate(self, make_run, field):
-        # "Unimplemented" and "waiting on a decision the student owns" are
+        # "Unimplemented" and "waiting on a decision the owner has not made" are
         # different states; the report must not blur them.
         assert "GATE" in _status(load_run(make_run()), field).detail
 

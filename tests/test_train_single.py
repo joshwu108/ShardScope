@@ -1,4 +1,4 @@
-"""Tests for the Week 1 training fixture (requirement SS-01).
+"""Tests for the training fixture (requirement SS-01).
 
 What SS-01 actually demands, and therefore what these tests pin down:
 a tiny, reproducible PyTorch training example with fixed-seed synthetic

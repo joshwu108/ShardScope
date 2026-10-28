@@ -95,7 +95,7 @@ def ignore_policy_failures(capture: Callable[..., Any] = _capture) -> list[str]:
     tracked = capture(["git", "ls-files", *MUST_NOT_BE_TRACKED]).stdout.split()
     if tracked:
         failures.append(
-            "these paths are tracked but the policy forbids it (needs the student's"
+            "these paths are tracked but the policy forbids it (needs the owner's"
             " approval to 'git rm --cached'): " + ", ".join(sorted(tracked))
         )
 

@@ -5,12 +5,12 @@ run's knobs must be expressible as a file rather than only as CLI flags --
 otherwise a recorded run cannot be replayed from its own provenance.
 
 Scope boundary, deliberately narrow: the fields below are exactly the knobs
-already implemented and measured in ``examples/train_single.py`` (Week 1,
-requirement SS-01). Profiler knobs -- the ``wait``/``warmup``/``active``/
+already implemented and measured in ``examples/train_single.py``
+(requirement SS-01). Profiler knobs -- the ``wait``/``warmup``/``active``/
 ``repeat`` schedule, the activity set, and the ``record_function`` marker
-names -- are **not** here, because they are open student decisions (GATE 2.1,
+names -- are **not** here, because they are open owner decisions (GATE 2.1,
 2.2, 2.3). Adding them before those gates close would mean this module
-choosing a measurement contract on the student's behalf.
+choosing a measurement contract on the owner's behalf.
 
 Validation is strict on purpose: an unreadable, misspelled or out-of-range
 config must fail before a run starts, not produce a run whose provenance
@@ -208,7 +208,7 @@ def _require_positive_finite_number(config: RunConfig, name: str, source: str) -
         raise ConfigError(f"{source}: config key {name!r} must be finite, got {value}.")
     # A sanity guard, not a tuning decision: a non-positive learning rate
     # does not describe a training run. Choosing an actual value is the
-    # student's call (GATE 1.1).
+    # owner's call (GATE 1.1).
     if value <= 0:
         raise ConfigError(f"{source}: config key {name!r} must be greater than 0, got {value}.")
 

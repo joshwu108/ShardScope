@@ -7,9 +7,9 @@ numbers are never presented as interchangeable.
     shardscope env                 # reproducibility snapshot (implemented)
     shardscope validate ...        # say whether a run directory can be reported (implemented)
     shardscope report ...          # render HTML/JSON/CSV from a run (implemented)
-    shardscope profile ...         # bounded profiled diagnostic run (Week 2-3)
-    shardscope bench ...           # warm, unprofiled throughput run (Week 3-7)
-    shardscope compare ...         # before/after with variance (Week 7)
+    shardscope profile ...         # bounded profiled diagnostic run (not implemented)
+    shardscope bench ...           # warm, unprofiled throughput run (not implemented)
+    shardscope compare ...         # before/after with variance (not implemented)
 
 ``report`` renders the artifacts a run already wrote -- the per-step CSV,
 the provenance dump and the recorded statistics -- and states, field by
@@ -22,7 +22,7 @@ argument names come from PRD v2.0 section 11, so ``--help`` documents the
 agreed interface target; invoking one exits non-zero and names the decision
 it waits on, rather than pretending to work. Memory Lab commands
 (``memory-sweep``, ``memory-report``) are deliberately absent: PRD v2.0
-section 10 gates that whole block on a Week 7 review that has not happened.
+section 10 gates that whole block on a review that has not happened.
 """
 
 from __future__ import annotations
@@ -69,25 +69,21 @@ class PendingCommand:
 
     ``blocked_on`` must name the specific open decision, not just say
     "unimplemented": the difference between "nobody has written this" and
-    "this is waiting on a measurement contract the student owns" is the
-    whole point of the PRD v2.0 section 13 approval gate.
+    "this is waiting on a measurement contract the owner has not settled" is
+    the whole point of the PRD v2.0 section 13 approval gate.
     """
 
     name: str
-    week: str
     summary: str
     blocked_on: str
     options: tuple[Option, ...] = field(default_factory=tuple)
 
     @property
     def help(self) -> str:
-        return f"{self.summary} (not implemented; Week {self.week})"
+        return f"{self.summary} (not implemented)"
 
     def message(self) -> str:
-        return (
-            f"'{self.name}' is not implemented yet -- it is a Week {self.week} "
-            f"deliverable. Blocked on: {self.blocked_on}"
-        )
+        return f"'{self.name}' is not implemented yet. Blocked on: {self.blocked_on}"
 
 
 _CONFIG_OPTION = Option(
@@ -97,13 +93,12 @@ _CONFIG_OPTION = Option(
 PENDING_COMMANDS: tuple[PendingCommand, ...] = (
     PendingCommand(
         name="profile",
-        week="2-3",
         summary="bounded profiled diagnostic run",
         blocked_on=(
             "the capture contract in src/shardscope/capture.py -- the profiler "
             "schedule (GATE 2.1), the activity set and extras (GATE 2.2) and the "
             "record_function marker names every later rule keys off (GATE 2.3) "
-            "are student decisions"
+            "are owner decisions"
         ),
         options=(
             _CONFIG_OPTION,
@@ -112,12 +107,11 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
     ),
     PendingCommand(
         name="bench",
-        week="3-7",
         summary="warm, never-profiled throughput run",
         blocked_on=(
             "the benchmark methodology in benchmarks/run_baseline.py -- warmup count, "
             "repeat count and the test used to call a difference real (GATE 7.1) are "
-            "student decisions"
+            "owner decisions"
         ),
         options=(
             _CONFIG_OPTION,
@@ -126,7 +120,6 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
     ),
     PendingCommand(
         name="compare",
-        week="7",
         summary="before/after comparison of two unprofiled runs",
         blocked_on=(
             "the same GATE 7.1 methodology decision as 'bench': without an agreed "

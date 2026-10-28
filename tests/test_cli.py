@@ -39,7 +39,7 @@ def test_unimplemented_commands_fail_loudly(command, capsys):
 
 @pytest.mark.parametrize("command", PENDING_NAMES)
 def test_unimplemented_commands_name_the_decision_they_wait_on(command, capsys):
-    # "Unimplemented" and "waiting on a decision the student owns" are
+    # "Unimplemented" and "waiting on a decision the owner has not made" are
     # different states; conflating them hides the approval gate.
     main([command])
     err = capsys.readouterr().err
@@ -88,7 +88,7 @@ def test_report_accepts_the_prd_section_11_flags():
 
 
 def test_memory_lab_commands_are_not_offered():
-    # PRD v2.0 section 10 gates the whole Memory Lab on a Week 7 review that
+    # PRD v2.0 section 10 gates the whole Memory Lab on a review that
     # has not happened; offering the commands would imply otherwise.
     assert "memory-sweep" not in PENDING_NAMES
     assert "memory-report" not in PENDING_NAMES

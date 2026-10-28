@@ -22,7 +22,7 @@ things is true:
 The distinction is the point. "Nobody measured this yet" and "this machine
 cannot measure this" are different facts, and neither one is zero (PRD v2.0
 section 8 "Guardrails"). Nothing here interprets a measurement, applies a
-threshold or attributes an event: those are student-owned (GATE 4.1, 4.2).
+threshold or attributes an event: those are owner decisions (GATE 4.1, 4.2).
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ def _data_wait_ms(run: RunArtifacts) -> FieldStatus:
         "capture that would produce one is unimplemented (GATE 2.1 schedule, "
         "GATE 2.2 activity set, GATE 2.3 marker names), and what the field means "
         "operationally -- time inside the load_data marker, or time the host "
-        "blocks on the loader iterator -- is GATE 3.2, an open student decision.",
+        "blocks on the loader iterator -- is GATE 3.2, an open owner decision.",
     )
 
 
@@ -186,8 +186,8 @@ def _collective_activity(run: RunArtifacts) -> FieldStatus:
         "collective_activity",
         NOT_RECORDED,
         f"This run recorded {count} CUDA device(s), but it is a single-device run "
-        "with no collective capture: DDP tracing is a Weeks 5-6 deliverable and is "
-        "unimplemented (GATE 5.1 synchronization strategy, GATE 5.2 straggler "
+        "with no collective capture: DDP tracing is unimplemented and hardware-gated "
+        "(GATE 5.1 synchronization strategy, GATE 5.2 straggler "
         "injection). Overlapping collectives must never be summed into step time.",
     )
 
@@ -197,8 +197,8 @@ def _per_rank_step_ms(run: RunArtifacts) -> FieldStatus:
         "per_rank_step_ms",
         NOT_RECORDED,
         f"{STEPS_CSV} carries no rank column: this is a single-device run. "
-        "Per-rank alignment arrives with the DDP block (Weeks 5-6), which is "
-        "unimplemented and hardware-gated.",
+        "Per-rank alignment arrives with the DDP block, which is unimplemented and "
+        "hardware-gated.",
     )
 
 
@@ -207,7 +207,7 @@ def _suspected_bottleneck(run: RunArtifacts) -> FieldStatus:
         "suspected_bottleneck",
         NOT_RECORDED,
         "No diagnosis is attached to this run. The rule engine is unimplemented, "
-        "and its thresholds are GATE 4.1 -- a student-owned decision. This report "
+        "and its thresholds are GATE 4.1 -- an owner decision. This report "
         "presents recorded measurements only; it does not attribute a cause.",
     )
 
@@ -218,7 +218,7 @@ def _confidence_or_visibility(run: RunArtifacts) -> FieldStatus:
         NOT_RECORDED,
         "No confidence label is attached to this run. The vocabulary a rule may "
         "emit, and the evidence each level requires, is GATE 4.2 -- a "
-        "student-owned decision this report must not pre-empt by inventing one.",
+        "an owner decision this report must not pre-empt by inventing one.",
     )
 
 

@@ -9,7 +9,7 @@ A run directory is the unit every later stage consumes:
 Scope boundary, deliberately narrow: this module understands exactly the
 artifact triple ``examples/train_single.py`` already writes. The *profiled*
 per-step schema -- ``data_wait_ms``, ``h2d_copy_ms`` and friends -- is an
-open student decision (GATE 3.1, GATE 3.2), so there is no loader for it
+open owner decision (GATE 3.1, GATE 3.2), so there is no loader for it
 here. A CSV carrying those columns is **refused**, not silently narrowed to
 the columns this module knows: quietly dropping a measured column is how a
 report comes to describe a run that did not happen.
@@ -80,7 +80,7 @@ _FALSE_VALUES = frozenset({"false", "0"})
 #: the column belongs to a schema nobody has approved yet rather than
 #: thinking this loader is simply out of date.
 _UNKNOWN_COLUMN_HINT = (
-    "This loader understands only the Week 1 fixture schema. The profiled "
+    "This loader understands only the schema examples/train_single.py writes. The profiled "
     "per-step schema (data_wait_ms, h2d_copy_ms, ...) is still an open "
     "decision -- GATE 3.1 (which fields are measured versus derived) and "
     "GATE 3.2 (what data_wait_ms means operationally) -- so there is no "

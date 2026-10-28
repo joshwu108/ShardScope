@@ -1,6 +1,6 @@
 """Warm, UNPROFILED throughput benchmark (requirement SS-04 / SS-06).
 
-Status: STUB (Week 3 deliverable, hardened in Week 7).
+Status: STUB.
 
 This script must never enable torch.profiler: profiling overhead would make
 its steps/s and examples/s numbers unusable as before/after evidence.
@@ -17,7 +17,7 @@ import sys
 #: two spellings of it would eventually disagree.
 BLOCKED_ON = (
     "the benchmark methodology -- warmup count, repeat count and the test used "
-    "to call a difference real (GATE 7.1) are student decisions"
+    "to call a difference real (GATE 7.1) are owner decisions"
 )
 
 
@@ -29,8 +29,7 @@ def main() -> int:
     waiting on a decision, and the message has to say which one.
     """
     print(
-        "error: benchmarks/run_baseline.py is not implemented yet -- it is a Week 3 "
-        f"deliverable. Blocked on: {BLOCKED_ON}",
+        f"error: benchmarks/run_baseline.py is not implemented yet. Blocked on: {BLOCKED_ON}",
         file=sys.stderr,
     )
     return 2
