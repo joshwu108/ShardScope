@@ -14,6 +14,7 @@ __all__ = [
     "ConfigError",
     "ReportError",
     "ShardScopeError",
+    "ValidationError",
 ]
 
 
@@ -45,6 +46,17 @@ class ReportError(ShardScopeError):
     Covers an unknown output format and rendering options that would produce
     a misleading document (for example a row cap of zero, which would render
     a run as if it had measured nothing).
+    """
+
+
+class ValidationError(ShardScopeError):
+    """A run directory loaded, but its artifacts do not describe one run.
+
+    Raised by ``shardscope validate`` when the recorded artifacts disagree --
+    today, when ``summary.json`` records a step count that ``steps.csv``
+    does not have. Loading succeeded, so this is not an :class:`ArtifactError`;
+    reporting still works and shows the disagreement, but the directory
+    cannot be vouched for as a recording of a single run.
     """
 
 

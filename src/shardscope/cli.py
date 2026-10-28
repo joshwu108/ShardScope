@@ -5,6 +5,7 @@ and throughput (unprofiled) benchmarks are different commands, and their
 numbers are never presented as interchangeable.
 
     shardscope env                 # reproducibility snapshot (implemented)
+    shardscope validate ...        # say whether a run directory can be reported (implemented)
     shardscope report ...          # render HTML/JSON/CSV from a run (implemented)
     shardscope profile ...         # bounded profiled diagnostic run (Week 2-3)
     shardscope bench ...           # warm, unprofiled throughput run (Week 3-7)
@@ -37,7 +38,7 @@ from pathlib import Path
 from shardscope import __version__
 from shardscope.artifacts import load_run
 from shardscope.env import capture_environment
-from shardscope.errors import BlockedOnDecisionError, ShardScopeError
+from shardscope.errors import BlockedOnDecisionError, ShardScopeError, ValidationError
 from shardscope.report import (
     DEFAULT_MAX_ROWS,
     REPORT_FORMATS,
@@ -45,6 +46,7 @@ from shardscope.report import (
     render,
     write_report,
 )
+from shardscope.validate import validate_run
 
 #: Exit code for "the reader of our stdout pipe hung up": 128 + SIGPIPE, the
 #: shell convention. Distinct from 2 (the user's mistake) and 0 (success), so
@@ -161,6 +163,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
 
+    validate_cmd = sub.add_parser(
+        "validate",
+        help="check that a run directory can be reported; writes nothing",
+        description=(
+            "Load a run directory exactly as 'report' does and say whether that worked, "
+            "what the run records and what it does not. Renders nothing and writes "
+            "nothing. Exit 0 for a loadable run whose artifacts agree; exit 2 when the "
+            "directory will not load or summary.json and steps.csv disagree about the "
+            "step count."
+        ),
+    )
+    validate_cmd.add_argument(
+        "--run",
+        metavar="DIR",
+        type=Path,
+        required=True,
+        help="run directory holding steps.csv and environment.json",
+    )
+    validate_cmd.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help=(
+            "output format (default: text). json always writes a document to stdout, "
+            "with ok=false and the error on a failure, and still exits 2"
+        ),
+    )
+
     report_cmd = sub.add_parser(
         "report",
         help="render a recorded run as HTML, JSON or CSV",
@@ -247,10 +277,32 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(env.to_json() if args.format == "json" else _render_env_text())
         return 0
 
+    if args.command == "validate":
+        return _run_validate(args)
+
     if args.command == "report":
         return _run_report(args)
 
     raise BlockedOnDecisionError(_PENDING_BY_NAME[args.command].message())
+
+
+def _run_validate(args: argparse.Namespace) -> int:
+    """Describe one run directory without touching it.
+
+    Text mode follows the rest of the CLI: a failure is one ``error:`` line
+    on stderr and exit 2. JSON mode is for automation, so the document goes
+    to stdout whatever the outcome and the exit code carries the verdict;
+    an ``ok=false`` document with the error inside it is more useful to a
+    script than an empty stdout.
+    """
+    result = validate_run(args.run)
+    if args.format == "json":
+        sys.stdout.write(result.to_json())
+        return 0 if result.ok else 2
+    if not result.ok:
+        raise ValidationError(result.errors[0])
+    sys.stdout.write(result.to_text())
+    return 0
 
 
 def _run_report(args: argparse.Namespace) -> int:

@@ -23,6 +23,9 @@ Early. Implemented today:
   later profiling runs measure. Runs on CPU, MPS or CUDA; emits per-step
   CSV plus an environment and summary sidecar.
 * Run configuration files, validated before anything executes.
+* ``shardscope validate`` -- says whether a run directory is a recording
+  that can be reported, and what it does and does not contain. Writes
+  nothing.
 * ``shardscope report`` -- renders a recorded run as HTML, JSON or CSV,
   including a field-by-field statement of what the run does *not* contain.
 
@@ -243,6 +246,45 @@ and swapped in, so a write that fails partway -- a full disk -- leaves the
 previous report intact rather than truncated. That is a single-file
 guarantee against partial writes, not durability against power loss.
 
+Validating a run
+================
+
+``shardscope validate`` answers one question about a run directory: can it
+be reported? It loads the directory exactly as ``report`` does, renders
+nothing, writes nothing, and prints what it found.
+
+.. code-block:: console
+
+   $ shardscope validate --run runs/baseline
+   valid run: runs/baseline
+     steps.csv         100 row(s), steps 0..99, synchronized=true, data_residency=host
+     environment.json  present; extra.profiled=false
+     summary.json      present; steps=100, agrees with steps.csv
+     files             environment.json, steps.csv, summary.json
+     fields            3 recorded, 2 not_observed, 6 not recorded (shardscope report explains each)
+     warnings          none
+
+An absent ``summary.json`` is valid and is said to be absent; no statistic
+is computed in its place. A run whose ``environment.json`` does not record
+``extra.profiled``, or whose rows were measured under different
+``synchronized`` or ``data_residency`` settings, validates with a warning
+that says so. Warnings never become defaults.
+
+Two things fail validation, with the project's usual one line on stderr and
+exit code 2: a directory that will not load (the same message ``report``
+would print), and a ``summary.json`` whose ``steps`` disagrees with the row
+count of ``steps.csv``. ``report`` renders that disagreement, because a
+report describes what is on disk; ``validate`` refuses it, because two
+artifacts that describe different runs cannot be vouched for as one
+recording. Neither number is adjusted in either command.
+
+``--format json`` writes the same result as a document for automation --
+``ok``, ``errors``, ``warnings``, the row and step range, the recorded step
+count and whether it agrees, ``profiled``, the file list and the per-field
+availability statuses. It carries no statistic. On a failure the document
+is still written, with ``ok: false`` and the error inside it, and the exit
+code is still 2.
+
 Honest-measurement rules
 ========================
 
@@ -313,6 +355,13 @@ Troubleshooting
   ``--run`` wants one run directory, not the parent that holds several. The
   message lists the run directories it found underneath.
 
+``error: <dir>: summary.json records steps=N but steps.csv has M row(s)``
+  From ``shardscope validate``. The two artifacts were written separately
+  and one of them does not describe this run -- usually a run directory
+  that was reused and partly overwritten. ``shardscope report`` will still
+  render it and flag the disagreement; do not treat it as a recording.
+  Repeat the run into a fresh directory.
+
 ``error: <file>: unexpected column(s): data_wait_ms``
   The CSV uses the profiled schema, which has no reader yet. The message
   names the open decisions. The column is not dropped, because a silently
@@ -376,8 +425,8 @@ authority; this paragraph is prose about it.
 
 ``smoke`` is the end-to-end gate: it checks the console script's version
 against the installed distribution, runs ``shardscope env``, runs the
-training fixture with and without ``--config``, and renders a real recorded
-run to HTML. ``tests/test_integration.py`` covers the same path as spawned
+training fixture with and without ``--config``, validates a real recorded
+run and renders it to HTML. ``tests/test_integration.py`` covers the same path as spawned
 processes and asserts on the output rather than only the exit codes.
 
 Tests that need hardware this machine lacks are marked ``gpu`` or
@@ -416,7 +465,8 @@ Repository layout
 .. code-block:: text
 
    src/shardscope/     cli, env, config, errors, artifacts, availability,
-                       report/html_report; capture/parse/rules skeletons
+                       validate, report/html_report; capture/parse/rules
+                       skeletons
    examples/           train_single.py, train_ddp.py
    benchmarks/         unprofiled throughput harness and comparisons
    tests/              unit and integration tests

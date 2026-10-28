@@ -185,10 +185,10 @@ def _installed_version() -> str:
 def check_smoke() -> None:
     """The installed console script, the fixture, and the report path all run.
 
-    The last two commands are the end-to-end artifact path: a real run
-    writes its triple into a throwaway directory, and ``shardscope report``
-    renders it. A unit test can pass against a fixture that no producer
-    writes; this cannot.
+    The last three commands are the end-to-end artifact path: a real run
+    writes its triple into a throwaway directory, ``shardscope validate``
+    vouches for it, and ``shardscope report`` renders it. A unit test can
+    pass against a fixture that no producer writes; this cannot.
     """
     script = shutil.which("shardscope")
     if script is None:
@@ -238,6 +238,7 @@ def check_smoke() -> None:
                 "--out-dir",
                 str(run_dir),
             ],
+            ["shardscope", "validate", "--run", str(run_dir)],
             ["shardscope", "report", "--run", str(run_dir), "--out", str(report)],
         ):
             print(f"$ {' '.join(argv)}", flush=True)
