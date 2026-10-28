@@ -564,3 +564,139 @@ class TestProducerParity:
             "min_step_ms",
             "max_step_ms",
         }
+
+
+class TestRecordedStepCount:
+    """``summary.json``'s ``steps`` is read, never coerced.
+
+    The report shows this number next to the row count and flags a
+    disagreement. A damaged value that is quietly coerced can therefore
+    manufacture agreement (3.5 truncating to 3) or crash the renderer (nan
+    and inf cannot become an int at all). Either way the summary on disk is
+    left exactly as written: the loader reports damage, it does not repair
+    it.
+    """
+
+    @pytest.mark.parametrize(
+        "payload", ['{"steps": NaN}', '{"steps": Infinity}', '{"steps": 1e999}']
+    )
+    def test_a_non_finite_count_is_unknown_and_the_summary_is_kept_verbatim(
+        self, make_run, payload
+    ):
+        run = load_run(make_run(summary=payload))
+
+        assert run.summary_step_count is None
+        assert not math.isfinite(run.summary["steps"])
+
+    def test_a_fractional_count_is_unknown_not_truncated(self, make_run):
+        # 3.5 rows is not a count. Truncating it to 3 would make a damaged
+        # summary agree with a three-row CSV.
+        run = load_run(make_run(summary={"steps": 3.5}))
+
+        assert run.summary_step_count is None
+        assert run.summary["steps"] == 3.5
+
+    def test_an_integer_valued_float_is_read_as_the_producer_writes_it(self, make_run):
+        # examples/train_single.py records steps as float(count), so 3.0 is
+        # the ordinary, valid spelling and must keep loading as 3.
+        count = load_run(make_run(summary={"steps": 3.0})).summary_step_count
+
+        assert count == 3
+        assert isinstance(count, int)
+
+    def test_a_negative_count_is_still_shown_so_the_disagreement_is_visible(self, make_run):
+        assert load_run(make_run(summary={"steps": -3})).summary_step_count == -3
+
+
+class TestFromDictInvariants:
+    """``from_dict`` is a loader, and must refuse what the CSV loader refuses.
+
+    Every failure below used to surface as a raw ``TypeError``,
+    ``OverflowError`` or a silently accepted run. The CLI only turns
+    :class:`ArtifactError` into an actionable line, so anything else reads
+    as a crash -- and a silently accepted run is worse than a crash.
+    """
+
+    @pytest.fixture
+    def payload(self, make_run):
+        return load_run(make_run()).to_dict()
+
+    @pytest.mark.parametrize("path", [5, None, "", ["a"]], ids=["int", "null", "empty", "list"])
+    def test_the_path_must_be_a_non_empty_string(self, payload, path):
+        with pytest.raises(ArtifactError, match="'path'"):
+            RunArtifacts.from_dict({**payload, "path": path})
+
+    @pytest.mark.parametrize("steps", ["abc", {}, 5, None], ids=["str", "dict", "int", "null"])
+    def test_the_steps_must_be_a_json_array(self, payload, steps):
+        with pytest.raises(ArtifactError, match="'steps'.*JSON array"):
+            RunArtifacts.from_dict({**payload, "steps": steps})
+
+    def test_an_empty_step_list_is_refused_like_an_empty_csv(self, payload):
+        with pytest.raises(ArtifactError, match="no step rows"):
+            RunArtifacts.from_dict({**payload, "steps": []})
+
+    def test_a_step_record_that_is_not_an_object_is_named_by_position(self, payload):
+        with pytest.raises(ArtifactError, match=r"steps\[1\].*JSON object"):
+            RunArtifacts.from_dict({**payload, "steps": [payload["steps"][0], 5]})
+
+    def test_a_missing_field_is_named_by_position(self, payload):
+        del payload["steps"][2]["loss"]
+
+        with pytest.raises(ArtifactError, match=r"steps\[2\].*loss"):
+            RunArtifacts.from_dict(payload)
+
+    def test_a_repeated_step_index_is_refused(self, payload):
+        first = payload["steps"][0]
+
+        with pytest.raises(ArtifactError, match=r"steps\[1\].*repeat"):
+            RunArtifacts.from_dict({**payload, "steps": [first, dict(first)]})
+
+    def test_a_decreasing_step_index_is_refused(self, payload):
+        reordered = [payload["steps"][1], payload["steps"][0]]
+
+        with pytest.raises(ArtifactError, match=r"steps\[1\].*increasing"):
+            RunArtifacts.from_dict({**payload, "steps": reordered})
+
+    @pytest.mark.parametrize("column", ["loss", "step_time_ms"])
+    def test_a_number_too_large_to_represent_is_refused_not_crashed_on(self, payload, column):
+        # JSON integers are unbounded; float() on 10**400 raises
+        # OverflowError, which the CLI would print as a traceback.
+        payload["steps"][0][column] = 10**400
+
+        with pytest.raises(ArtifactError, match=f"'{column}'.*too large"):
+            RunArtifacts.from_dict(payload)
+
+    def test_a_large_step_index_is_an_integer_and_loads(self, payload):
+        payload["steps"] = [{**payload["steps"][0], "step": 10**30}]
+
+        assert RunArtifacts.from_dict(payload).steps[0].step == 10**30
+
+    @pytest.mark.parametrize(
+        "names", [5, "steps.csv", [1], [None]], ids=["int", "str", "int-item", "null-item"]
+    )
+    def test_the_artifact_names_must_be_an_array_of_strings(self, payload, names):
+        # A string is iterable, so "steps.csv" would silently become nine
+        # one-character file names; a non-string item crashes the renderer.
+        with pytest.raises(ArtifactError, match="'artifact_names'"):
+            RunArtifacts.from_dict({**payload, "artifact_names": names})
+
+    def test_a_step_record_that_is_not_a_mapping_is_refused(self):
+        with pytest.raises(ArtifactError, match="JSON object"):
+            StepRow.from_dict(5)
+
+
+class TestReaderLimits:
+    def test_an_oversized_field_is_refused_with_the_file_and_line(self, tmp_path):
+        # csv.reader enforces a field size limit (128 KiB by default) and
+        # raises its own csv.Error, which is not a ShardScopeError and so
+        # would reach the user as a traceback.
+        path = tmp_path / STEPS_CSV
+        path.write_text(_csv("0,1.0,2.0,host,True", f"1,1.0,2.0,{'x' * 200_000},True"))
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_steps_csv(path)
+
+        message = str(excinfo.value)
+        assert str(path) in message
+        assert "line 3" in message
+        assert "field larger" in message

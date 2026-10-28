@@ -505,3 +505,23 @@ class TestWriteReport:
     def test_a_report_error_is_a_shardscope_error(self, make_run, tmp_path):
         with pytest.raises(ShardScopeError):
             write_report(load_run(make_run()), tmp_path / "r.html", fmt="pdf")
+
+
+class TestDamagedRecordedCounts:
+    @pytest.mark.parametrize("payload", ['{"steps": NaN}', '{"steps": 3.5}', '{"steps": 1e999}'])
+    def test_an_unreadable_count_renders_as_unknown_not_as_a_crash_or_agreement(
+        self, make_run, payload
+    ):
+        # int(nan) raises and int(3.5) is 3: the first crashed the renderer,
+        # the second made a damaged summary agree with a three-row CSV.
+        html = render_html(load_run(make_run(summary=payload)))
+
+        assert "no readable <code>steps</code> count" in html
+        assert "disagree" not in html
+
+    def test_the_damaged_value_is_still_shown_in_the_statistics_table(self, make_run):
+        # Unknown as a *count*, but the recorded value itself is evidence of
+        # the damage and stays visible verbatim.
+        html = render_html(load_run(make_run(summary={"steps": 3.5})))
+
+        assert "3.5" in html
