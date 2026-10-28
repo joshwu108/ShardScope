@@ -399,3 +399,39 @@ def test_an_unexpected_error_is_not_swallowed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="kaboom"):
         main(["env"])
+
+
+class TestReportDoesNotOverwriteItsInput:
+    @pytest.mark.parametrize("name", ["steps.csv", "environment.json", "summary.json"])
+    def test_an_output_that_is_a_source_artifact_is_refused_with_one_line(
+        self, make_run, name, capsys
+    ):
+        run_dir = make_run()
+        before = (run_dir / name).read_bytes()
+
+        code = main(["report", "--run", str(run_dir), "--out", str(run_dir / name)])
+
+        assert code == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error: ")
+        assert err.count("\n") == 1
+        assert name in err
+        assert (run_dir / name).read_bytes() == before
+
+    def test_an_explicit_format_does_not_bypass_the_check(self, make_run, capsys):
+        run_dir = make_run()
+
+        code = main(
+            [
+                "report",
+                "--run",
+                str(run_dir),
+                "--out",
+                str(run_dir / "steps.csv"),
+                "--format",
+                "csv",
+            ]
+        )
+
+        assert code == 2
+        assert (run_dir / "steps.csv").read_text() == GOOD_STEPS_CSV

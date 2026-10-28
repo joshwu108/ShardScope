@@ -525,3 +525,108 @@ class TestDamagedRecordedCounts:
         html = render_html(load_run(make_run(summary={"steps": 3.5})))
 
         assert "3.5" in html
+
+
+class TestWriteReportProtectsTheEvidence:
+    """``--out`` must never replace an artifact of the run being reported.
+
+    ``report --run runs/x --out runs/x/steps.csv`` would render the run and
+    then write the rendering over the evidence it came from. The check runs
+    before the output is opened and follows symlinks and relative aliases,
+    because those resolve to the same bytes on disk.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "fmt"),
+        [("steps.csv", "csv"), ("environment.json", "json"), ("summary.json", "json")],
+    )
+    def test_refuses_to_overwrite_a_source_artifact(self, make_run, name, fmt):
+        run_dir = make_run()
+        before = (run_dir / name).read_bytes()
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), run_dir / name, fmt=fmt)
+
+        assert (run_dir / name).read_bytes() == before
+
+    def test_refuses_a_relative_alias_of_a_source_artifact(self, make_run):
+        run_dir = make_run()
+        alias = run_dir / ".." / run_dir.name / "steps.csv"
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), alias, fmt="csv")
+
+    def test_refuses_a_symlink_to_a_source_artifact(self, make_run, tmp_path):
+        run_dir = make_run()
+        link = tmp_path / "elsewhere.csv"
+        link.symlink_to(run_dir / "steps.csv")
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), link, fmt="html")
+
+        assert (run_dir / "steps.csv").read_text() == GOOD_STEPS_CSV
+
+    def test_refuses_a_sidecar_artifact_too(self, make_run):
+        run_dir = make_run(extra_files=("trace_rank_0.json",))
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), run_dir / "trace_rank_0.json", fmt="json")
+
+    def test_a_new_file_inside_the_run_directory_is_not_a_collision(self, make_run):
+        # Only existing evidence is protected; where a report goes is the
+        # caller's choice.
+        run_dir = make_run()
+
+        written = write_report(load_run(run_dir), run_dir / "report.html", fmt="html")
+
+        assert written.read_text().startswith("<!DOCTYPE html>")
+
+    def test_a_failed_replacement_preserves_the_previous_report(
+        self, make_run, tmp_path, monkeypatch
+    ):
+        import os
+
+        out = tmp_path / "report.html"
+        out.write_text("<!DOCTYPE html>previous, complete report")
+
+        def no_space(_src, _dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", no_space)
+
+        with pytest.raises(ReportError, match="cannot write"):
+            write_report(load_run(make_run()), out, fmt="html")
+
+        assert out.read_text() == "<!DOCTYPE html>previous, complete report"
+        assert [path.name for path in tmp_path.iterdir() if path.is_file()] == ["report.html"]
+
+    def test_the_csv_report_is_written_with_lf_endings_and_utf8(self, make_run, tmp_path):
+        name = "büro-サーバー"
+        run = load_run(make_run(environment={**GOOD_ENVIRONMENT, "platform": name}))
+
+        as_csv = write_report(run, tmp_path / "r.csv", fmt="csv")
+        as_html = write_report(run, tmp_path / "r.html", fmt="html")
+
+        assert b"\r\n" not in as_csv.read_bytes()
+        assert as_csv.read_bytes() == GOOD_STEPS_CSV.encode("utf-8")
+        assert name.encode("utf-8") in as_html.read_bytes()
+
+    def test_an_unanswerable_collision_check_refuses_rather_than_guessing(
+        self, make_run, tmp_path, monkeypatch
+    ):
+        # If the filesystem will not say whether two paths are the same file,
+        # writing anyway could be the overwrite the check exists to prevent.
+        from pathlib import Path
+
+        out = tmp_path / "report.html"
+        out.write_text("existing")
+
+        def denied(self, _other):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "samefile", denied)
+
+        with pytest.raises(ReportError, match="cannot check"):
+            write_report(load_run(make_run()), out, fmt="html")
+
+        assert out.read_text() == "existing"

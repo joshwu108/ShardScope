@@ -230,6 +230,15 @@ schema, for instance -- is refused rather than loaded with those columns
 dropped, because a silently narrowed file would produce a report describing a
 run that did not happen.
 
+``--out`` may not name an artifact of the run being reported. ``--out
+runs/baseline/steps.csv`` would replace the evidence with a rendering of it,
+so it is refused before the file is opened, and so is a symlink or relative
+alias that resolves to the same file. Elsewhere, an existing report is
+replaced whole: the new document is written to a temporary file beside it
+and swapped in, so a write that fails partway -- a full disk -- leaves the
+previous report intact rather than truncated. That is a single-file
+guarantee against partial writes, not durability against power loss.
+
 Honest-measurement rules
 ========================
 
@@ -315,6 +324,12 @@ Troubleshooting
   sequence, so the directory may hold an incomplete set;
   ``shardscope report`` refuses such a directory rather than rendering a
   run that was not fully recorded.
+
+``error: refusing to write the report over <file>: --out names an artifact of the run``
+  ``--out`` points at ``steps.csv``, ``environment.json``, ``summary.json``
+  or another file inside the run directory being reported (possibly through
+  a symlink). Write the report somewhere else; the run directory is the
+  evidence and is never overwritten by the tool that reads it.
 
 ``error: cannot tell the report format from 'x.pdf'``
   Use an ``.html``, ``.htm``, ``.json`` or ``.csv`` suffix, or pass

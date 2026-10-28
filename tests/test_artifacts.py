@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from shardscope.artifacts import (
     load_run,
     load_steps_csv,
     looks_like_run,
+    replace_file_contents,
     write_steps_csv,
 )
 from shardscope.errors import ArtifactError, ShardScopeError
@@ -700,3 +702,128 @@ class TestReaderLimits:
         assert str(path) in message
         assert "line 3" in message
         assert "field larger" in message
+
+
+class TestReplaceFileContents:
+    """A single-file write that never leaves a half-written destination.
+
+    The text goes to a sibling temporary file, which then replaces the
+    destination. A reader sees the old file or the new one, never a prefix
+    of the new one, and a failed write leaves the old file alone.
+    """
+
+    def test_writes_the_exact_bytes_without_newline_translation(self, tmp_path):
+        target = tmp_path / "out" / "steps.csv"
+        text = "a,b\n1,2\né\n"
+
+        assert replace_file_contents(target, text) == target
+        assert target.read_bytes() == text.encode("utf-8")
+
+    def test_replaces_an_existing_file_and_leaves_nothing_else_behind(self, tmp_path):
+        target = tmp_path / "report.html"
+        target.write_text("old")
+
+        replace_file_contents(target, "new")
+
+        assert target.read_text() == "new"
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_a_failed_replacement_preserves_the_previous_file(self, tmp_path, monkeypatch):
+        target = tmp_path / "report.html"
+        target.write_text("previous, valid")
+
+        def no_space(_src, _dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", no_space)
+
+        with pytest.raises(OSError, match="No space"):
+            replace_file_contents(target, "half-written replacement")
+
+        assert target.read_text() == "previous, valid"
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_a_failed_write_preserves_the_previous_file(self, tmp_path, monkeypatch):
+        # The failure strikes while the bytes are going out, before any
+        # replacement: the common full-disk case.
+        target = tmp_path / "report.html"
+        target.write_text("previous, valid")
+        real_fdopen = os.fdopen
+
+        class Failing:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def write(self, _text):
+                raise OSError(28, "No space left on device")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._handle.close()
+
+        monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: Failing(real_fdopen(fd, *a, **k)))
+
+        with pytest.raises(OSError, match="No space"):
+            replace_file_contents(target, "replacement")
+
+        assert target.read_text() == "previous, valid"
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_the_temporary_file_is_a_sibling_of_the_destination(self, tmp_path, monkeypatch):
+        # A temp file in another directory could be on another filesystem,
+        # where os.replace is not a rename and not atomic.
+        seen = {}
+        real_replace = os.replace
+
+        def spy(src, dst):
+            seen["src"] = Path(src)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", spy)
+        target = tmp_path / "nested" / "report.html"
+
+        replace_file_contents(target, "x")
+
+        assert seen["src"].parent == target.parent
+        assert not seen["src"].exists()
+
+    def test_the_destination_is_readable_by_others_under_the_default_umask(self, tmp_path):
+        # tempfile's helpers create 0600 files; replacing a report with one
+        # would quietly make shared reports owner-only. The destination
+        # should look like any file created under the caller's umask.
+        if os.name != "posix":
+            pytest.skip("permission bits are POSIX-specific")
+        previous = os.umask(0o022)
+        try:
+            target = tmp_path / "report.html"
+            replace_file_contents(target, "x")
+        finally:
+            os.umask(previous)
+
+        assert target.stat().st_mode & 0o777 == 0o644
+
+    def test_a_directory_in_the_way_is_an_os_error_and_leaves_no_temp_file(self, tmp_path):
+        target = tmp_path / "report.html"
+        target.mkdir()
+
+        with pytest.raises(OSError):
+            replace_file_contents(target, "x")
+
+        assert target.is_dir()
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_a_taken_temporary_name_is_skipped(self, tmp_path, monkeypatch):
+        import secrets
+
+        target = tmp_path / "report.html"
+        taken = target.with_name(".report.html.0000000000000000.tmp")
+        taken.write_text("someone else's")
+        tokens = iter(["0000000000000000", "1111111111111111"])
+        monkeypatch.setattr(secrets, "token_hex", lambda _n: next(tokens))
+
+        replace_file_contents(target, "mine")
+
+        assert target.read_text() == "mine"
+        assert taken.read_text() == "someone else's"

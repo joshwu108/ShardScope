@@ -27,10 +27,13 @@ Two rules the validation follows:
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
 import math
+import os
+import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +53,7 @@ __all__ = [
     "load_run",
     "load_steps_csv",
     "looks_like_run",
+    "replace_file_contents",
     "steps_csv_text",
     "write_steps_csv",
 ]
@@ -679,11 +683,64 @@ def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
             f"refusing to write a per-step CSV with no rows: {path}. "
             "An empty CSV would read as a run that measured nothing."
         )
+    return replace_file_contents(path, steps_csv_text(rows))
+
+
+#: Attempts at an unused sibling name before giving up. A collision needs
+#: another writer to have picked the same 64-bit token in the same directory.
+_TEMP_NAME_ATTEMPTS = 8
+
+
+def replace_file_contents(path: str | Path, text: str) -> Path:
+    """Write ``text`` to ``path`` so no reader ever sees a partial file.
+
+    The text goes to a temporary file in the same directory, that file is
+    closed, and ``os.replace`` swaps it into place. What that does and does
+    not promise:
+
+    * A failed write -- a full disk, a permission that changed -- leaves a
+      previously valid ``path`` exactly as it was and removes the temporary
+      file. A concurrent reader sees the old contents or the new ones.
+    * It is a single-file guarantee. Writing three artifacts is three
+      replacements, not one transaction.
+    * Nothing is fsync'd: the swap is atomic against other readers, not
+      against power loss.
+    * The destination gets the permissions of a file newly created under
+      the current umask, not those of the file it replaced. The temporary
+      file is opened with ``os.open`` rather than :mod:`tempfile` for that
+      reason: ``tempfile`` creates ``0600`` files, which would turn a shared
+      report into an owner-only one.
+    * ``newline=""`` and UTF-8, so the bytes on disk are the rendered text.
+
+    Missing parent directories are created. ``OSError`` propagates: the
+    caller knows what the file was for and can say so.
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="", encoding="utf-8") as handle:
-        handle.write(steps_csv_text(rows))
+    descriptor, temporary = _open_sibling_temp(target)
+    try:
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
     return target
+
+
+def _open_sibling_temp(target: Path) -> tuple[int, Path]:
+    """Create an exclusive, umask-respecting temporary file next to ``target``."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for _ in range(_TEMP_NAME_ATTEMPTS):
+        candidate = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            return os.open(candidate, flags, 0o666), candidate
+        except FileExistsError:
+            continue
+    raise OSError(  # pragma: no cover - needs eight 64-bit token collisions
+        f"could not create a temporary file next to {target} after {_TEMP_NAME_ATTEMPTS} attempts"
+    )
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:

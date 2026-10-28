@@ -26,7 +26,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from shardscope.artifacts import RunArtifacts, steps_csv_text
+from shardscope.artifacts import (
+    ENVIRONMENT_JSON,
+    STEPS_CSV,
+    SUMMARY_JSON,
+    RunArtifacts,
+    replace_file_contents,
+    steps_csv_text,
+)
 from shardscope.availability import field_statuses
 from shardscope.errors import ReportError
 from shardscope.html_report import DEFAULT_MAX_ROWS, render_html
@@ -131,21 +138,57 @@ def write_report(
 ) -> Path:
     """Render ``run`` and write it to ``out``, returning the path written.
 
-    The document is rendered in full before anything touches the
-    filesystem, so a rendering failure leaves no half-written report (and no
-    directory) behind to be mistaken for a real one.
+    Three things happen in a fixed order, and the order is the point:
+
+    1. The document is rendered in full. A rendering failure therefore
+       leaves no half-written report, and no directory, behind.
+    2. ``out`` is checked against the run's own artifacts. ``--out
+       runs/x/steps.csv`` would replace the evidence with a rendering of it,
+       so that is refused before anything is opened -- through symlinks and
+       relative aliases too, since those are the same bytes on disk.
+    3. The text replaces ``out`` whole, via a sibling temporary file. A
+       write that fails partway leaves a previously valid report intact
+       rather than truncated (:func:`~shardscope.artifacts.replace_file_contents`
+       states exactly what that does and does not guarantee).
     """
     text = render(run, fmt, generated_at=generated_at, max_rows=max_rows)
     target = Path(out)
+    _refuse_source_collision(run, target)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # newline="" and an explicit encoding: the CSV view promises bytes
-        # identical to the producer's file, which rules out newline
-        # translation and a locale-dependent encoding.
-        with target.open("w", newline="", encoding="utf-8") as handle:
-            handle.write(text)
+        replace_file_contents(target, text)
     except OSError as exc:
         # A directory in the way, or a file where a directory belongs, is the
         # user's mistake and deserves a sentence rather than a traceback.
         raise ReportError(f"cannot write the report to {target}: {exc.strerror or exc}.") from exc
     return target
+
+
+def _refuse_source_collision(run: RunArtifacts, target: Path) -> None:
+    """Refuse an output path that is one of the run's recorded artifact files.
+
+    Candidates are the files the run listed when it was loaded plus the
+    three the layout always names, so a run rebuilt from a JSON report with
+    no file list is still protected. Only an existing file can collide; a
+    new file inside the run directory is the caller's choice and becomes
+    part of the directory listing on the next load.
+    """
+    if not target.exists():
+        return
+    names = {*run.artifact_names, STEPS_CSV, ENVIRONMENT_JSON, SUMMARY_JSON}
+    for name in sorted(names):
+        candidate = run.path / name
+        try:
+            collides = candidate.is_file() and target.samefile(candidate)
+        except OSError as exc:
+            raise ReportError(
+                f"cannot check whether --out {target} is an artifact of the run being "
+                f"reported ({candidate}): {exc.strerror or exc}. Choose an output path "
+                "outside the run directory."
+            ) from exc
+        if collides:
+            raise ReportError(
+                f"refusing to write the report over {candidate}: --out names an artifact "
+                f"of the run being reported ({run.path}). That file is part of the evidence "
+                "the report describes; writing the report over it would replace the evidence "
+                "with a description of it. Choose an output path outside the run directory."
+            )
