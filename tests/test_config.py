@@ -1,9 +1,4 @@
-"""Run-configuration loading and validation.
-
-A config file is provenance for a run (PRD v2.0 section 4, "Run contract").
-These tests pin the two properties that matter: nothing invalid gets through,
-and every rejection message says enough to fix the file.
-"""
+"""Configuration loading, validation and CLI precedence tests."""
 
 from __future__ import annotations
 
@@ -287,3 +282,22 @@ class TestShippedExampleConfigs:
         config = load_run_config(self.CONFIG_DIR / "cpu_baseline.json")
 
         assert config == RunConfig(device="cpu")
+
+
+class TestJsonParserLimits:
+    @pytest.mark.parametrize(
+        "payload",
+        ['{"steps": ' + "9" * 5000 + "}", "[" * 100_000 + "]" * 100_000],
+        ids=["oversized-int", "deep-nesting"],
+    )
+    def test_an_unparseable_config_is_a_config_error_naming_the_file(self, tmp_path, payload):
+        # json.loads raises a plain ValueError past 4300 digits and a
+        # RecursionError on deep nesting; neither is a JSONDecodeError, and
+        # neither must reach the user as a traceback.
+        path = tmp_path / "run.json"
+        path.write_text(payload, encoding="utf-8")
+
+        with pytest.raises(ConfigError) as excinfo:
+            load_run_config(path)
+
+        assert str(path) in str(excinfo.value)

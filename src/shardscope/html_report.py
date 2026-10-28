@@ -1,22 +1,11 @@
-"""Render a loaded run as a single self-contained HTML document.
+"""Render a run as a self-contained HTML document.
 
-Formatting only. Every number in the output came from an artifact on disk:
-nothing here derives a statistic, converts an absent measurement into a
-value, or adds overlapping durations together (PRD v2.0 section 8
-"Guardrails"). Where a field is absent, the document says so and says why --
-that text comes from :mod:`shardscope.availability`.
+All interpolated provenance, paths and filenames are HTML-escaped. No scripts,
+external stylesheets or network requests are required to open the result.
+Identical artifacts and generation timestamps produce identical output.
 
-Three properties this module is written to keep:
-
-* **Escaped.** Everything interpolated into the document goes through
-  :func:`html.escape`, including provenance read out of ``environment.json``
-  and file names read off disk. A trace, a config path or a device name can
-  carry arbitrary text from the profiled program, and a report is often the
-  artifact that gets shared.
-* **Self-contained.** No scripts, no stylesheets, no network references. The
-  file opens from disk with nothing fetched.
-* **Deterministic.** The same run and the same ``generated_at`` render
-  byte-identically, so two reports can be diffed.
+Rendering preserves recorded values and availability states without deriving
+statistics or adding overlapping activity durations.
 """
 
 from __future__ import annotations
@@ -111,28 +100,27 @@ def _header(run: RunArtifacts, *, title: str, generated_at: str | None) -> str:
 
 
 def _profiling_callout(run: RunArtifacts) -> str:
-    """State what kind of numbers follow, in the words of requirement SS-04."""
+    """Explain whether recorded timings include profiling overhead."""
     status = run.profiled
     if status is None:
         text = (
             f"<strong>Profiling status was not recorded.</strong> This run's "
             f"{_esc(ENVIRONMENT_JSON)} has no <code>extra.profiled</code> flag, so "
-            "whether a profiler was attached is unknown. Requirement SS-04 keeps "
-            "diagnostic and throughput figures apart, and an unknown status cannot "
-            "be read as either; treat the step times below as unclassified."
+            "whether a profiler was attached is unknown. Treat these step times "
+            "as unclassified; their profiling overhead is unknown."
         )
     elif status:
         text = (
             "<strong>Profiled diagnostic run.</strong> The step times below carry "
-            "profiler overhead. Requirement SS-04: they are diagnostic evidence and "
+            "profiler overhead. They are diagnostic evidence and "
             "must not be quoted as throughput results."
         )
     else:
         text = (
             "<strong>Unprofiled run.</strong> No profiler was attached. The step "
             "times below still come from a timed fixture run rather than from the "
-            "warm, repeated benchmark harness (GATE 7.1, unimplemented), so under "
-            "requirement SS-04 they are not throughput results either."
+            "warm, repeated benchmark harness, which is not implemented. "
+            "These fixture timings are not throughput results."
         )
     return f'<div class="callout">{text}</div>'
 
@@ -150,7 +138,7 @@ def _availability_section(run: RunArtifacts) -> str:
     return "\n".join(
         (
             "<h2>What this run records</h2>",
-            '<p class="sub">The core report fields of PRD v2.0 section 5. An absent '
+            '<p class="sub">Measurement availability for this run. An absent '
             "field is absent, with its reason; it is never shown as zero.</p>",
             _table(("field", "status", "why"), rows),
         )
@@ -239,8 +227,7 @@ def _provenance_section(run: RunArtifacts) -> str:
     ]
     lines = [
         "<h2>Provenance</h2>",
-        f'<p class="sub">From {_esc(ENVIRONMENT_JSON)} (PRD v2.0 section 4, run '
-        "contract), preserved as recorded.</p>",
+        f'<p class="sub">From {_esc(ENVIRONMENT_JSON)}, preserved as recorded.</p>',
         _table(("key", "value"), rows),
     ]
     if extra_rows:
@@ -261,7 +248,7 @@ def _notes_section() -> str:
     notes = (
         "Profiled diagnostic runs and unprofiled throughput benchmarks are "
         "different measurements. A profiled step time is never a throughput "
-        "result (requirement SS-04).",
+        "result.",
         "GPU kernels, host-to-device copies and collectives overlap. Their "
         "durations do not sum to step time, so this report does not sum them and "
         "derives no &quot;percent wasted&quot; figure from them.",
@@ -269,8 +256,8 @@ def _notes_section() -> str:
         "with the reason; a field nobody captured is shown as not recorded. "
         "Neither is rendered as zero.",
         "No diagnosis, threshold or confidence label appears in this report. "
-        "Those are open decisions (GATE 4.1 thresholds, GATE 4.2 confidence "
-        "vocabulary), and inventing one here would put words in the author's mouth.",
+        "Diagnostic thresholds and confidence criteria are not yet defined; "
+        "no inference is made from incomplete evidence.",
     )
     items = "\n".join(f"<li>{note}</li>" for note in notes)
     return "\n".join(("<h2>How to read this report</h2>", f'<ul class="notes">{items}</ul>'))

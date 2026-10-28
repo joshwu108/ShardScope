@@ -1,44 +1,22 @@
-"""Tiny single-device training loop -- the fixture every ShardScope run profiles.
+"""Reproducible single-device training fixture with fixed-seed synthetic input.
 
-Requirement SS-01: a tiny, reproducible PyTorch training example with
-fixed-seed synthetic input.
+Dataset generation uses a dedicated ``torch.Generator`` and model initialization
+uses ``fork_rng`` so neither changes global RNG state. Batches follow the same
+seeded permutation in both data-residency modes.
 
-Authorship: written by the AI agent at the student's request, under the
-"Project plumbing" row of PRD v2.0 section 13 ("Project scaffold, examples,
-CLI, parsers, reports, fixtures"). It contains no custom kernels and no
-device hot-path optimization; those remain student-owned. Nothing here may be
-presented as the student's own GPU work.
+Host residency copies each batch to the device during the step. Device residency
+places the dataset on the device before training, so no per-step host-to-device
+copy exists. The small model and default batch size keep fixture runs bounded.
 
-Design notes that later weeks depend on:
-
-* ``make_synthetic_dataset`` draws from its own ``torch.Generator`` and
-  ``build_model`` initializes inside ``fork_rng``, so neither disturbs the
-  global RNG. A fixture that silently reseeds would make every later
-  before/after comparison suspect.
-* Batches come from one seeded permutation with wrap-around, so the *same*
-  examples are seen in the same order regardless of where the data lives.
-  That is what makes the two ``--data-residency`` modes comparable.
-* ``.item()`` on the loss forces a device synchronize, so it is called only
-  after the step timer stops. Otherwise ``--no-sync`` would secretly
-  synchronize and measure the same thing as ``--sync``.
-
-Open approval gates (PRD v2.0 section 13 approval gate) -- current values are
-defaults, not decisions:
-
-* GATE 1.1 model shape and batch size: the defaults below (a 9,098-parameter
-  CNN, batch 64) are chosen to keep steps and traces small. Replace them if
-  the student wants a different operating point.
-* GATE 1.2 data residency: deliberately unresolved. ``host`` copies each
-  batch to the device per step, so a host-to-device transfer exists and can
-  be measured; ``device`` pre-places the whole dataset, so no such transfer
-  exists and ``h2d_copy_ms`` is structurally absent. Both run; the student
-  picks after measuring.
+Loss extraction happens after the timer stops because ``.item()`` synchronizes
+the device. Moving it into the timed region would change ``--no-sync`` semantics.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import math
 import os
@@ -95,9 +73,8 @@ def make_synthetic_dataset(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(images, labels)`` drawn from a seed-local generator.
 
-    The data is meaningless by design (PRD v2.0 section 5, SS-01 asks for
-    seeded synthetic input and no accuracy score); only its shape, dtype and
-    reproducibility matter.
+    Synthetic input exercises the training path without an accuracy target.
+    Shape, dtype and reproducibility determine fixture behavior.
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples}")
@@ -244,18 +221,31 @@ def run_training(
     return tuple(records)
 
 
-def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
-    """Write per-step records to ``path`` (requirement SS-03, CSV half)."""
+def step_csv_text(records: Sequence[StepRecord]) -> str:
+    """Render per-step records as CSV text.
+
+    ``\n`` line endings, explicitly: the csv module defaults to ``\r\n``,
+    and ``shardscope.artifacts.steps_csv_text`` -- the reader's rendering,
+    which ``shardscope report --format csv`` emits -- writes ``\n``. The two
+    have to agree byte for byte or "the CSV view is the recorded file" is
+    only true after newline translation.
+    """
     if not records:
         raise ValueError("refusing to write a step CSV with no records")
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(STEP_CSV_COLUMNS))
-        writer.writeheader()
-        for record in records:
-            writer.writerow(asdict(record))
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=list(STEP_CSV_COLUMNS), lineterminator="\n")
+    writer.writeheader()
+    for record in records:
+        writer.writerow(asdict(record))
+    return buffer.getvalue()
+
+
+def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
+    """Write per-step records to ``path``, replacing any existing file whole."""
+    from shardscope.artifacts import replace_file_contents
+
+    replace_file_contents(path, step_csv_text(records))
 
 
 def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
@@ -265,7 +255,8 @@ def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
     step time rather than an interpolation between two of them.
 
     These come from a *timed* run, not from the warm unprofiled benchmark
-    Week 3 adds, and must not be quoted as throughput results.
+    harness (benchmark methodology not implemented), and must not be quoted as throughput
+    results.
     """
     if not records:
         raise ValueError("refusing to summarize an empty record set")
@@ -297,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=None,
-        help="JSON run config (PRD v2.0 section 11); explicit flags below override it",
+        help="JSON run config; explicit flags below override it",
     )
     parser.add_argument("--steps", type=int, default=None, help=f"default {DEFAULT_STEPS}")
     parser.add_argument(
@@ -389,9 +380,27 @@ def out_dir_problem(out_dir: Path) -> str | None:
 
 
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
+    """Write the artifact triple, each file landing whole or not at all.
+
+    All three documents are rendered before the first byte goes out, and
+    each then replaces its destination through a sibling temporary file
+    (:func:`shardscope.artifacts.replace_file_contents`). The failures that
+    actually happen -- a full disk, a permission that changed during the run
+    -- therefore strike while a temporary file is being written and leave an
+    earlier recording in ``out_dir`` untouched instead of half-overwritten.
+
+    What this is not: a transaction. The three swaps happen one after
+    another, so a failure between them can leave the directory holding
+    fewer than three files, or files from two recordings. ``shardscope
+    report`` refuses a missing file and flags a step-count disagreement, but
+    cannot tell two complete recordings apart beyond that. Closing the gap
+    means a new rule for reusing a run directory (refuse it, or write into a
+    fresh subdirectory), which changes the documented ``--out-dir`` contract
+    and is not decided here.
+    """
+    from shardscope.artifacts import replace_file_contents
     from shardscope.env import capture_environment
 
-    write_step_csv(out_dir / "steps.csv", records)
     environment = capture_environment().with_extra(
         steps=config.steps,
         batch_size=config.batch_size,
@@ -406,10 +415,13 @@ def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) ->
         profiled=False,
         source="examples/train_single.py",
     )
-    (out_dir / "environment.json").write_text(environment.to_json() + "\n", encoding="utf-8")
-    (out_dir / "summary.json").write_text(
-        json.dumps(stats, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    documents = (
+        ("steps.csv", step_csv_text(records)),
+        ("environment.json", environment.to_json() + "\n"),
+        ("summary.json", json.dumps(stats, indent=2, sort_keys=True) + "\n"),
     )
+    for name, text in documents:
+        replace_file_contents(out_dir / name, text)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -461,16 +473,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         except OSError as exc:
             # The run itself succeeded; say plainly that its artifacts did
             # not survive, so the numbers above are not mistaken for a
-            # recorded run.
-            # "may be incomplete", not "were not saved": the three files
-            # are written in sequence, so a failure partway through leaves
-            # some of them. Claiming nothing survived would be as wrong as
-            # claiming the run was recorded.
+            # recorded run. Not "nothing was written": each file lands whole
+            # or not at all, but the three are swapped in one after another,
+            # so a failure between swaps leaves some of them -- possibly
+            # beside an earlier recording's files.
             print(
                 f"error: the run finished but its artifacts could not be written to "
-                f"{args.out_dir}: {exc.strerror or exc}. This run is not recorded and "
-                "the directory may hold an incomplete artifact set; 'shardscope "
-                "report' will refuse it. Repeat the run.",
+                f"{args.out_dir}: {exc.strerror or exc}. This run is not recorded. The "
+                "directory may hold an incomplete artifact set, or a mix of this run's "
+                "files and an earlier recording's; do not report from it. Repeat the run.",
                 file=sys.stderr,
             )
             return 2

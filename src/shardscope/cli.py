@@ -1,27 +1,12 @@
 """Command-line entry point for ShardScope.
 
-Subcommand split mirrors PRD requirement SS-04: diagnostic (profiled) runs
-and throughput (unprofiled) benchmarks are different commands, and their
-numbers are never presented as interchangeable.
+``env`` captures reproducibility metadata, ``validate`` checks recorded run
+artifacts, and ``report`` renders HTML, JSON or CSV without adding measurements.
 
-    shardscope env                 # reproducibility snapshot (implemented)
-    shardscope report ...          # render HTML/JSON/CSV from a run (implemented)
-    shardscope profile ...         # bounded profiled diagnostic run (Week 2-3)
-    shardscope bench ...           # warm, unprofiled throughput run (Week 3-7)
-    shardscope compare ...         # before/after with variance (Week 7)
-
-``report`` renders the artifacts a run already wrote -- the per-step CSV,
-the provenance dump and the recorded statistics -- and states, field by
-field, what the run does *not* contain and why. It adds no measurement: the
-profiled per-step schema is GATE 3.1/3.2 and has no reader yet, so a CSV
-carrying those columns is refused rather than partially rendered.
-
-``profile``, ``bench`` and ``compare`` are declared but unimplemented. The
-argument names come from PRD v2.0 section 11, so ``--help`` documents the
-agreed interface target; invoking one exits non-zero and names the decision
-it waits on, rather than pretending to work. Memory Lab commands
-(``memory-sweep``, ``memory-report``) are deliberately absent: PRD v2.0
-section 10 gates that whole block on a Week 7 review that has not happened.
+``profile``, ``bench`` and ``compare`` expose their planned interfaces but exit
+with an explicit dependency message until their measurement contracts are
+implemented. Diagnostic and throughput measurements remain separate commands.
+Memory sweeps are outside the current command interface.
 """
 
 from __future__ import annotations
@@ -37,7 +22,7 @@ from pathlib import Path
 from shardscope import __version__
 from shardscope.artifacts import load_run
 from shardscope.env import capture_environment
-from shardscope.errors import BlockedOnDecisionError, ShardScopeError
+from shardscope.errors import BlockedOnDecisionError, ShardScopeError, ValidationError
 from shardscope.report import (
     DEFAULT_MAX_ROWS,
     REPORT_FORMATS,
@@ -45,6 +30,7 @@ from shardscope.report import (
     render,
     write_report,
 )
+from shardscope.validate import validate_run
 
 #: Exit code for "the reader of our stdout pipe hung up": 128 + SIGPIPE, the
 #: shell convention. Distinct from 2 (the user's mistake) and 0 (success), so
@@ -65,27 +51,21 @@ class Option:
 class PendingCommand:
     """A command that exists as an interface target but cannot run yet.
 
-    ``blocked_on`` must name the specific open decision, not just say
-    "unimplemented": the difference between "nobody has written this" and
-    "this is waiting on a measurement contract the student owns" is the
-    whole point of the PRD v2.0 section 13 approval gate.
+    ``blocked_on`` names the missing measurement contract or implementation
+    dependency so callers can distinguish unsupported behavior from a crash.
     """
 
     name: str
-    week: str
     summary: str
     blocked_on: str
     options: tuple[Option, ...] = field(default_factory=tuple)
 
     @property
     def help(self) -> str:
-        return f"{self.summary} (not implemented; Week {self.week})"
+        return f"{self.summary} (not implemented)"
 
     def message(self) -> str:
-        return (
-            f"'{self.name}' is not implemented yet -- it is a Week {self.week} "
-            f"deliverable. Blocked on: {self.blocked_on}"
-        )
+        return f"'{self.name}' is not implemented yet. Blocked on: {self.blocked_on}"
 
 
 _CONFIG_OPTION = Option(
@@ -95,13 +75,10 @@ _CONFIG_OPTION = Option(
 PENDING_COMMANDS: tuple[PendingCommand, ...] = (
     PendingCommand(
         name="profile",
-        week="2-3",
         summary="bounded profiled diagnostic run",
         blocked_on=(
-            "the capture contract in src/shardscope/capture.py -- the profiler "
-            "schedule (GATE 2.1), the activity set and extras (GATE 2.2) and the "
-            "record_function marker names every later rule keys off (GATE 2.3) "
-            "are student decisions"
+            "the capture contract in src/shardscope/capture.py -- profiler schedule, "
+            "activity selection and phase marker names remain undefined"
         ),
         options=(
             _CONFIG_OPTION,
@@ -110,12 +87,10 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
     ),
     PendingCommand(
         name="bench",
-        week="3-7",
         summary="warm, never-profiled throughput run",
         blocked_on=(
             "the benchmark methodology in benchmarks/run_baseline.py -- warmup count, "
-            "repeat count and the test used to call a difference real (GATE 7.1) are "
-            "student decisions"
+            "repeat count and statistical significance criteria remain undefined"
         ),
         options=(
             _CONFIG_OPTION,
@@ -124,10 +99,9 @@ PENDING_COMMANDS: tuple[PendingCommand, ...] = (
     ),
     PendingCommand(
         name="compare",
-        week="7",
         summary="before/after comparison of two unprofiled runs",
         blocked_on=(
-            "the same GATE 7.1 methodology decision as 'bench': without an agreed "
+            "the benchmark methodology used by 'bench': without a defined "
             "variance test this command could only report a percentage it cannot "
             "defend"
         ),
@@ -161,13 +135,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
 
+    validate_cmd = sub.add_parser(
+        "validate",
+        help="check that a run directory can be reported; writes nothing",
+        description=(
+            "Load a run directory exactly as 'report' does and say whether that worked, "
+            "what the run records and what it does not. Renders nothing and writes "
+            "nothing. Exit 0 for a loadable run whose artifacts agree; exit 2 when the "
+            "directory will not load or summary.json and steps.csv disagree about the "
+            "step count."
+        ),
+    )
+    validate_cmd.add_argument(
+        "--run",
+        metavar="DIR",
+        type=Path,
+        required=True,
+        help="run directory holding steps.csv and environment.json",
+    )
+    validate_cmd.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help=(
+            "output format (default: text). json always writes a document to stdout, "
+            "with ok=false and the error on a failure, and still exits 2"
+        ),
+    )
+
     report_cmd = sub.add_parser(
         "report",
         help="render a recorded run as HTML, JSON or CSV",
         description=(
             "Render the artifacts a run directory already contains. Shows the "
             "recorded provenance, statistics and per-step rows, and states which "
-            "PRD v2.0 section 5 report fields the run does not contain, with the "
+            "report fields the run does not contain, with the "
             "reason for each. Computes no new measurement."
         ),
     )
@@ -247,10 +249,32 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(env.to_json() if args.format == "json" else _render_env_text())
         return 0
 
+    if args.command == "validate":
+        return _run_validate(args)
+
     if args.command == "report":
         return _run_report(args)
 
     raise BlockedOnDecisionError(_PENDING_BY_NAME[args.command].message())
+
+
+def _run_validate(args: argparse.Namespace) -> int:
+    """Describe one run directory without touching it.
+
+    Text mode follows the rest of the CLI: a failure is one ``error:`` line
+    on stderr and exit 2. JSON mode is for automation, so the document goes
+    to stdout whatever the outcome and the exit code carries the verdict;
+    an ``ok=false`` document with the error inside it is more useful to a
+    script than an empty stdout.
+    """
+    result = validate_run(args.run)
+    if args.format == "json":
+        sys.stdout.write(result.to_json())
+        return 0 if result.ok else 2
+    if not result.ok:
+        raise ValidationError(result.errors[0])
+    sys.stdout.write(result.to_text())
+    return 0
 
 
 def _run_report(args: argparse.Namespace) -> int:

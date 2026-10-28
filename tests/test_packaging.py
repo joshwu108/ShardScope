@@ -1,9 +1,7 @@
-"""Packaging metadata guards.
+"""Packaging metadata consistency checks.
 
-The installed distribution's version and ``shardscope.__version__`` must not
-drift: every run artifact records the package version as provenance (PRD v2.0
-section 4, "Run contract"), so two different answers to "what version
-produced this?" would make a recorded run unreproducible.
+The installed distribution and package attribute must report the same version
+so recorded provenance identifies a single build.
 """
 
 from __future__ import annotations

@@ -1,9 +1,7 @@
-"""Tests for the tracked commit tooling (PRD v2.0 sections 13.1 / 13.2).
+"""Commit tooling checks for path restrictions and local authorization.
 
-These guard the safety rules, which matter more than the convenience: the
-deny list must beat the allow list, Markdown and planning documents must
-never be stageable, and the bootstrap must be honest about the missing
-reference skill.
+Denied paths must override allowlists. Bootstrap must preserve unrelated local
+files and report unavailable reference conventions accurately.
 """
 
 from __future__ import annotations
@@ -123,16 +121,15 @@ def test_rendered_skill_has_no_unfilled_placeholder():
 
 
 class TestAuthorizationIsNeverOverwritten:
-    """The auth file is the student's recorded consent, not agent state.
+    """Authorization is explicit local configuration.
 
-    An agent that could rewrite it could grant itself permission, so
-    ``--authorize`` only ever creates the file, and the template it creates
-    is unauthorized.
+    ``--authorize`` must preserve existing settings and create disabled
+    templates so initialization cannot silently enable commits.
     """
 
     def test_an_existing_auth_file_is_left_byte_for_byte_alone(self, tmp_path, monkeypatch, capsys):
         recorded = (
-            '{\n  "authorized": true,\n  "author_name": "student",\n'
+            '{\n  "authorized": true,\n  "author_name": "Developer",\n'
             '  "author_email": "s@example.com",\n  "allow_patterns": ["src/**"]\n}\n'
         )
         auth = tmp_path / commit_safe.AUTH_FILE
@@ -178,7 +175,7 @@ class TestBootstrapWritesOnlyTheSkill:
             "# skill\n\nReference: @@REFERENCE_STATUS@@\n", encoding="utf-8"
         )
         (tmp_path / commit_safe.AUTH_FILE).write_text(
-            '{"authorized": true, "author_name": "student"}\n', encoding="utf-8"
+            '{"authorized": true, "author_name": "Developer"}\n', encoding="utf-8"
         )
         (tmp_path / ".agents").mkdir()
         (tmp_path / ".agents" / "custom-instructions.md").write_text(

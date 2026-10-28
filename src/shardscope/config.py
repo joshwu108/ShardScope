@@ -1,20 +1,12 @@
-"""Run configuration: load and validate the knobs a ShardScope run accepts.
+"""Load and validate single-device training configuration.
 
-PRD v2.0 section 11 specifies ``shardscope profile --config <file>``, so a
-run's knobs must be expressible as a file rather than only as CLI flags --
-otherwise a recorded run cannot be replayed from its own provenance.
+A JSON config records the knobs needed to reproduce a fixture run. Explicit CLI
+flags override file values; omitted flags preserve them. Invalid keys, types,
+and ranges fail before training starts.
 
-Scope boundary, deliberately narrow: the fields below are exactly the knobs
-already implemented and measured in ``examples/train_single.py`` (Week 1,
-requirement SS-01). Profiler knobs -- the ``wait``/``warmup``/``active``/
-``repeat`` schedule, the activity set, and the ``record_function`` marker
-names -- are **not** here, because they are open student decisions (GATE 2.1,
-2.2, 2.3). Adding them before those gates close would mean this module
-choosing a measurement contract on the student's behalf.
-
-Validation is strict on purpose: an unreadable, misspelled or out-of-range
-config must fail before a run starts, not produce a run whose provenance
-disagrees with what actually executed.
+Only settings implemented by ``examples/train_single.py`` are accepted.
+Profiler schedules, activities and phase markers are excluded until the capture
+contract is defined.
 """
 
 from __future__ import annotations
@@ -39,7 +31,7 @@ __all__ = [
 #: resolves to cuda, then mps, then cpu.
 DEVICE_CHOICES = ("auto", "cpu", "mps", "cuda")
 
-#: Accepted ``data_residency`` values (GATE 1.2 is open; both are supported).
+#: Supported batch-placement strategies.
 DATA_RESIDENCY_CHOICES = ("host", "device")
 
 #: Keys beginning with this prefix are ignored, so a config can carry notes.
@@ -55,8 +47,7 @@ class RunConfig:
     described it must not be mutable, or the artifact it is written into
     could disagree with what ran.
 
-    The defaults match ``examples/train_single.py``. They are *defaults*,
-    not settled choices -- GATE 1.1 (model shape and batch size) is open.
+    Defaults match ``examples/train_single.py`` and can be overridden per run.
     """
 
     steps: int = 100
@@ -125,8 +116,15 @@ def load_run_config(path: str | Path) -> RunConfig:
 
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is one ValueError; an integer literal past
+        # CPython's 4300-digit limit is another, raised with no position.
         raise ConfigError(f"{target} is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise ConfigError(
+            f"{target} is nested too deeply to be read. A config is a flat JSON object "
+            f"with any of: {', '.join(field_names())}."
+        ) from exc
 
     return from_mapping(payload, source=str(target))
 
@@ -206,9 +204,7 @@ def _require_positive_finite_number(config: RunConfig, name: str, source: str) -
         )
     if not math.isfinite(value):
         raise ConfigError(f"{source}: config key {name!r} must be finite, got {value}.")
-    # A sanity guard, not a tuning decision: a non-positive learning rate
-    # does not describe a training run. Choosing an actual value is the
-    # student's call (GATE 1.1).
+    # Validate the range without choosing a tuning policy.
     if value <= 0:
         raise ConfigError(f"{source}: config key {name!r} must be greater than 0, got {value}.")
 

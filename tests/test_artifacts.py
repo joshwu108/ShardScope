@@ -3,7 +3,7 @@
 These tests cover the artifact triple ``examples/train_single.py`` already
 writes -- ``steps.csv``, ``environment.json``, ``summary.json`` -- and
 nothing else. The *profiled* per-step schema (``data_wait_ms``,
-``h2d_copy_ms``, ...) is GATE 3.1/3.2 and deliberately has no loader here;
+``h2d_copy_ms``, ...) is the profiled metric schema and deliberately has no loader here;
 the point of ``test_an_unknown_column_is_refused_not_dropped`` is that a
 file carrying those columns is refused rather than silently narrowed.
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,8 @@ from shardscope.artifacts import (
     load_run,
     load_steps_csv,
     looks_like_run,
+    replace_file_contents,
+    steps_csv_text,
     write_steps_csv,
 )
 from shardscope.errors import ArtifactError, ShardScopeError
@@ -56,7 +59,7 @@ class TestLoadStepsCsv:
 
     def test_a_bounded_capture_window_may_start_anywhere(self, tmp_path):
         # A profiled window will not start at step 0; requiring 0..N would
-        # reject a legitimate bounded capture (GATE 2.1).
+        # reject a legitimate bounded capture (bounded capture schedule).
         path = tmp_path / STEPS_CSV
         path.write_text(_csv("10,1.0,2.0,host,True", "11,1.0,2.0,host,True"))
 
@@ -117,7 +120,7 @@ class TestLoadStepsCsv:
             load_steps_csv(path)
 
         assert "data_wait_ms" in str(excinfo.value)
-        assert "GATE 3.1" in str(excinfo.value)
+        assert "metric schema" in str(excinfo.value)
 
     def test_a_duplicated_column_is_refused(self, tmp_path):
         path = tmp_path / STEPS_CSV
@@ -228,7 +231,7 @@ class TestLoadRun:
         assert str(run_dir) in str(excinfo.value)
 
     def test_a_missing_environment_is_refused_as_lost_provenance(self, make_run):
-        # PRD v2.0 section 4: a run without its provenance cannot be judged
+        # A run without provenance cannot be judged
         # comparable to anything, so it must not render as a report.
         with pytest.raises(ArtifactError) as excinfo:
             load_run(make_run(environment=None))
@@ -564,3 +567,326 @@ class TestProducerParity:
             "min_step_ms",
             "max_step_ms",
         }
+
+
+class TestRecordedStepCount:
+    """``summary.json``'s ``steps`` is read, never coerced.
+
+    The report shows this number next to the row count and flags a
+    disagreement. A damaged value that is quietly coerced can therefore
+    manufacture agreement (3.5 truncating to 3) or crash the renderer (nan
+    and inf cannot become an int at all). Either way the summary on disk is
+    left exactly as written: the loader reports damage, it does not repair
+    it.
+    """
+
+    @pytest.mark.parametrize(
+        "payload", ['{"steps": NaN}', '{"steps": Infinity}', '{"steps": 1e999}']
+    )
+    def test_a_non_finite_count_is_unknown_and_the_summary_is_kept_verbatim(
+        self, make_run, payload
+    ):
+        run = load_run(make_run(summary=payload))
+
+        assert run.summary_step_count is None
+        assert not math.isfinite(run.summary["steps"])
+
+    def test_a_fractional_count_is_unknown_not_truncated(self, make_run):
+        # 3.5 rows is not a count. Truncating it to 3 would make a damaged
+        # summary agree with a three-row CSV.
+        run = load_run(make_run(summary={"steps": 3.5}))
+
+        assert run.summary_step_count is None
+        assert run.summary["steps"] == 3.5
+
+    def test_an_integer_valued_float_is_read_as_the_producer_writes_it(self, make_run):
+        # examples/train_single.py records steps as float(count), so 3.0 is
+        # the ordinary, valid spelling and must keep loading as 3.
+        count = load_run(make_run(summary={"steps": 3.0})).summary_step_count
+
+        assert count == 3
+        assert isinstance(count, int)
+
+    def test_a_negative_count_is_still_shown_so_the_disagreement_is_visible(self, make_run):
+        assert load_run(make_run(summary={"steps": -3})).summary_step_count == -3
+
+
+class TestFromDictInvariants:
+    """``from_dict`` is a loader, and must refuse what the CSV loader refuses.
+
+    Every failure below used to surface as a raw ``TypeError``,
+    ``OverflowError`` or a silently accepted run. The CLI only turns
+    :class:`ArtifactError` into an actionable line, so anything else reads
+    as a crash -- and a silently accepted run is worse than a crash.
+    """
+
+    @pytest.fixture
+    def payload(self, make_run):
+        return load_run(make_run()).to_dict()
+
+    @pytest.mark.parametrize("path", [5, None, "", ["a"]], ids=["int", "null", "empty", "list"])
+    def test_the_path_must_be_a_non_empty_string(self, payload, path):
+        with pytest.raises(ArtifactError, match="'path'"):
+            RunArtifacts.from_dict({**payload, "path": path})
+
+    @pytest.mark.parametrize("steps", ["abc", {}, 5, None], ids=["str", "dict", "int", "null"])
+    def test_the_steps_must_be_a_json_array(self, payload, steps):
+        with pytest.raises(ArtifactError, match="'steps'.*JSON array"):
+            RunArtifacts.from_dict({**payload, "steps": steps})
+
+    def test_an_empty_step_list_is_refused_like_an_empty_csv(self, payload):
+        with pytest.raises(ArtifactError, match="no step rows"):
+            RunArtifacts.from_dict({**payload, "steps": []})
+
+    def test_a_step_record_that_is_not_an_object_is_named_by_position(self, payload):
+        with pytest.raises(ArtifactError, match=r"steps\[1\].*JSON object"):
+            RunArtifacts.from_dict({**payload, "steps": [payload["steps"][0], 5]})
+
+    def test_a_missing_field_is_named_by_position(self, payload):
+        del payload["steps"][2]["loss"]
+
+        with pytest.raises(ArtifactError, match=r"steps\[2\].*loss"):
+            RunArtifacts.from_dict(payload)
+
+    def test_a_repeated_step_index_is_refused(self, payload):
+        first = payload["steps"][0]
+
+        with pytest.raises(ArtifactError, match=r"steps\[1\].*repeat"):
+            RunArtifacts.from_dict({**payload, "steps": [first, dict(first)]})
+
+    def test_a_decreasing_step_index_is_refused(self, payload):
+        reordered = [payload["steps"][1], payload["steps"][0]]
+
+        with pytest.raises(ArtifactError, match=r"steps\[1\].*increasing"):
+            RunArtifacts.from_dict({**payload, "steps": reordered})
+
+    @pytest.mark.parametrize("column", ["loss", "step_time_ms"])
+    def test_a_number_too_large_to_represent_is_refused_not_crashed_on(self, payload, column):
+        # JSON integers are unbounded; float() on 10**400 raises
+        # OverflowError, which the CLI would print as a traceback.
+        payload["steps"][0][column] = 10**400
+
+        with pytest.raises(ArtifactError, match=f"'{column}'.*too large"):
+            RunArtifacts.from_dict(payload)
+
+    def test_a_large_step_index_is_an_integer_and_loads(self, payload):
+        payload["steps"] = [{**payload["steps"][0], "step": 10**30}]
+
+        assert RunArtifacts.from_dict(payload).steps[0].step == 10**30
+
+    @pytest.mark.parametrize(
+        "names", [5, "steps.csv", [1], [None]], ids=["int", "str", "int-item", "null-item"]
+    )
+    def test_the_artifact_names_must_be_an_array_of_strings(self, payload, names):
+        # A string is iterable, so "steps.csv" would silently become nine
+        # one-character file names; a non-string item crashes the renderer.
+        with pytest.raises(ArtifactError, match="'artifact_names'"):
+            RunArtifacts.from_dict({**payload, "artifact_names": names})
+
+    def test_a_step_record_that_is_not_a_mapping_is_refused(self):
+        with pytest.raises(ArtifactError, match="JSON object"):
+            StepRow.from_dict(5)
+
+
+class TestReaderLimits:
+    def test_an_oversized_field_is_refused_with_the_file_and_line(self, tmp_path):
+        # csv.reader enforces a field size limit (128 KiB by default) and
+        # raises its own csv.Error, which is not a ShardScopeError and so
+        # would reach the user as a traceback.
+        path = tmp_path / STEPS_CSV
+        path.write_text(_csv("0,1.0,2.0,host,True", f"1,1.0,2.0,{'x' * 200_000},True"))
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_steps_csv(path)
+
+        message = str(excinfo.value)
+        assert str(path) in message
+        assert "line 3" in message
+        assert "field larger" in message
+
+
+class TestReplaceFileContents:
+    """A single-file write that never leaves a half-written destination.
+
+    The text goes to a sibling temporary file, which then replaces the
+    destination. A reader sees the old file or the new one, never a prefix
+    of the new one, and a failed write leaves the old file alone.
+    """
+
+    def test_writes_the_exact_bytes_without_newline_translation(self, tmp_path):
+        target = tmp_path / "out" / "steps.csv"
+        text = "a,b\n1,2\né\n"
+
+        assert replace_file_contents(target, text) == target
+        assert target.read_bytes() == text.encode("utf-8")
+
+    def test_replaces_an_existing_file_and_leaves_nothing_else_behind(self, tmp_path):
+        target = tmp_path / "report.html"
+        target.write_text("old")
+
+        replace_file_contents(target, "new")
+
+        assert target.read_text() == "new"
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_a_failed_replacement_preserves_the_previous_file(self, tmp_path, monkeypatch):
+        target = tmp_path / "report.html"
+        target.write_text("previous, valid")
+
+        def no_space(_src, _dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", no_space)
+
+        with pytest.raises(OSError, match="No space"):
+            replace_file_contents(target, "half-written replacement")
+
+        assert target.read_text() == "previous, valid"
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_a_failed_write_preserves_the_previous_file(self, tmp_path, monkeypatch):
+        # The failure strikes while the bytes are going out, before any
+        # replacement: the common full-disk case.
+        target = tmp_path / "report.html"
+        target.write_text("previous, valid")
+        real_fdopen = os.fdopen
+
+        class Failing:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def write(self, _text):
+                raise OSError(28, "No space left on device")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._handle.close()
+
+        monkeypatch.setattr(os, "fdopen", lambda fd, *a, **k: Failing(real_fdopen(fd, *a, **k)))
+
+        with pytest.raises(OSError, match="No space"):
+            replace_file_contents(target, "replacement")
+
+        assert target.read_text() == "previous, valid"
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_the_temporary_file_is_a_sibling_of_the_destination(self, tmp_path, monkeypatch):
+        # A temp file in another directory could be on another filesystem,
+        # where os.replace is not a rename and not atomic.
+        seen = {}
+        real_replace = os.replace
+
+        def spy(src, dst):
+            seen["src"] = Path(src)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", spy)
+        target = tmp_path / "nested" / "report.html"
+
+        replace_file_contents(target, "x")
+
+        assert seen["src"].parent == target.parent
+        assert not seen["src"].exists()
+
+    def test_the_destination_is_readable_by_others_under_the_default_umask(self, tmp_path):
+        # tempfile's helpers create 0600 files; replacing a report with one
+        # would quietly make shared reports unreadable to other users. The destination
+        # should look like any file created under the caller's umask.
+        if os.name != "posix":
+            pytest.skip("permission bits are POSIX-specific")
+        previous = os.umask(0o022)
+        try:
+            target = tmp_path / "report.html"
+            replace_file_contents(target, "x")
+        finally:
+            os.umask(previous)
+
+        assert target.stat().st_mode & 0o777 == 0o644
+
+    def test_a_directory_in_the_way_is_an_os_error_and_leaves_no_temp_file(self, tmp_path):
+        target = tmp_path / "report.html"
+        target.mkdir()
+
+        with pytest.raises(OSError):
+            replace_file_contents(target, "x")
+
+        assert target.is_dir()
+        assert [path.name for path in tmp_path.iterdir()] == ["report.html"]
+
+    def test_a_taken_temporary_name_is_skipped(self, tmp_path, monkeypatch):
+        import secrets
+
+        target = tmp_path / "report.html"
+        taken = target.with_name(".report.html.0000000000000000.tmp")
+        taken.write_text("someone else's")
+        tokens = iter(["0000000000000000", "1111111111111111"])
+        monkeypatch.setattr(secrets, "token_hex", lambda _n: next(tokens))
+
+        replace_file_contents(target, "mine")
+
+        assert target.read_text() == "mine"
+        assert taken.read_text() == "someone else's"
+
+
+class TestProducerBytes:
+    def test_the_recorded_csv_is_byte_identical_to_the_readers_rendering(self, tmp_path):
+        # The promise steps_csv_text makes. Before the producer switched to
+        # "\\n" it held only after universal-newline translation.
+        import train_single
+
+        out_dir = tmp_path / "fixture-run"
+        train_single.main(["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(out_dir)])
+
+        run = load_run(out_dir)
+
+        assert (out_dir / STEPS_CSV).read_bytes() == steps_csv_text(run.steps).encode("utf-8")
+
+
+class TestJsonParserLimits:
+    """Failures json.loads raises that are not JSONDecodeError.
+
+    CPython refuses an integer literal over 4300 digits with a plain
+    ``ValueError`` and a deeply nested document with ``RecursionError``.
+    Neither is a ShardScopeError, so left alone both reach the user as a
+    traceback instead of naming the damaged file.
+    """
+
+    OVERSIZED = '{"steps": ' + "9" * 5000 + "}"
+    DEEP = "[" * 100_000 + "]" * 100_000
+
+    @pytest.mark.parametrize("artifact", [ENVIRONMENT_JSON, SUMMARY_JSON])
+    @pytest.mark.parametrize("payload", [OVERSIZED, DEEP], ids=["oversized-int", "deep-nesting"])
+    def test_an_unparseable_json_artifact_names_the_file(self, make_run, artifact, payload):
+        run_dir = make_run(**{artifact.removesuffix(".json"): payload})
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_run(run_dir)
+
+        assert artifact in str(excinfo.value)
+
+
+class TestNumericSpellings:
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "1_0,1.0,2.0,host,True",
+            "0,1_0.5,2.0,host,True",
+            "0,1.0,1_0,host,True",
+            "١,1.0,2.0,host,True",
+            "0,1.0,١٠,host,True",
+        ],
+        ids=["int-underscore", "loss-underscore", "time-underscore", "int-arabic", "time-arabic"],
+    )
+    def test_python_only_numeric_spellings_are_refused(self, tmp_path, row):
+        # int() and float() accept underscores and non-ASCII digits. The
+        # producer never writes them, so a cell like 1_0 is a hand edit, and
+        # loading it as 10 would quietly accept a file that is not ours.
+        path = tmp_path / STEPS_CSV
+        path.write_text(_csv("0,1.0,2.0,host,True", row) if not row.startswith("0,") else _csv(row))
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_steps_csv(path)
+
+        assert "row" in str(excinfo.value)

@@ -1,12 +1,8 @@
-"""Reproducibility metadata for a ShardScope run.
+"""Capture reproducibility metadata for training runs.
 
-PRD v2.0 section 4 ("Run contract"): every benchmark or diagnostic artifact
-must record enough environment detail that another person can judge whether
-two runs are comparable. Section 9 ("Statistical trust") depends on the same
-snapshot travelling with every measurement.
-
-This module is deliberately dependency-light and never imports CUDA eagerly,
-so it works on a CPU-only laptop and inside CI.
+Each run records interpreter, library and device details so its measurements can
+be interpreted in context. CUDA is never imported eagerly; environment capture
+also works on CPU-only hosts and in CI.
 """
 
 from __future__ import annotations
@@ -18,7 +14,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 #: Value used anywhere a quantity could not be observed in this environment.
-#: Never substitute 0 or a guess -- see PRD v2.0 section 8 "Guardrails".
+#: Keep unobservable activity distinct from a measured zero.
 NOT_OBSERVED = "not_observed"
 
 
@@ -62,7 +58,7 @@ class RunEnvironment:
         """True only when a real multi-CUDA-device DDP run is possible here.
 
         DDP/NCCL claims in any report must be gated on this returning True;
-        PRD v2.0 section 8 forbids reporting distributed results that were not run.
+        Device availability alone does not establish that a distributed run occurred.
         """
         return distributed_capable(
             cuda_available=self.cuda_available, device_count=self.device_count
@@ -77,7 +73,7 @@ def distributed_capable(*, cuda_available: bool, device_count: int) -> bool:
     same rule as the live machine, instead of each caller re-spelling
     ">= 2 devices". A report that disagreed with ``shardscope env`` about
     what a host can do is exactly how a distributed claim gets made for a
-    run that never happened (PRD v2.0 section 8).
+    run that never happened.
     """
     return bool(cuda_available) and device_count >= 2
 

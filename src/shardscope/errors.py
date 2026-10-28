@@ -14,6 +14,7 @@ __all__ = [
     "ConfigError",
     "ReportError",
     "ShardScopeError",
+    "ValidationError",
 ]
 
 
@@ -48,11 +49,21 @@ class ReportError(ShardScopeError):
     """
 
 
+class ValidationError(ShardScopeError):
+    """A run directory loaded, but its artifacts do not describe one run.
+
+    Raised by ``shardscope validate`` when the recorded artifacts disagree --
+    today, when ``summary.json`` records a step count that ``steps.csv``
+    does not have. Loading succeeded, so this is not an :class:`ArtifactError`;
+    reporting still works and shows the disagreement, but the directory
+    cannot be vouched for as a recording of a single run.
+    """
+
+
 class BlockedOnDecisionError(ShardScopeError):
     """A command exists as an interface target but cannot run yet.
 
-    Raised where a feature is blocked on a decision the student owns (PRD
-    v2.0 section 13 approval gate) rather than on unwritten plumbing. The
+    Raised when a required measurement contract has not been defined. The
     message names the blocking decision so the gap is legible instead of
     looking like a crash.
     """

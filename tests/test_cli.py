@@ -31,7 +31,7 @@ PENDING_NAMES = [command.name for command in PENDING_COMMANDS]
 
 @pytest.mark.parametrize("command", PENDING_NAMES)
 def test_unimplemented_commands_fail_loudly(command, capsys):
-    # Requirement SS-04 depends on these staying distinct commands; a stub
+    # Measurement classification depends on these staying distinct commands; a stub
     # must exit non-zero rather than silently appear to succeed.
     assert main([command]) == 2
     assert "not implemented yet" in capsys.readouterr().err
@@ -39,13 +39,12 @@ def test_unimplemented_commands_fail_loudly(command, capsys):
 
 @pytest.mark.parametrize("command", PENDING_NAMES)
 def test_unimplemented_commands_name_the_decision_they_wait_on(command, capsys):
-    # "Unimplemented" and "waiting on a decision the student owns" are
-    # different states; conflating them hides the approval gate.
+    # Refusals must identify the missing measurement contract.
     main([command])
     err = capsys.readouterr().err
 
     assert "Blocked on:" in err
-    assert "GATE" in err
+    assert "capture contract" in err or "benchmark methodology" in err
 
 
 @pytest.mark.parametrize("command", PENDING_COMMANDS, ids=PENDING_NAMES)
@@ -60,9 +59,8 @@ def test_unimplemented_commands_have_no_side_effects(command, tmp_path, capsys):
     assert set(tmp_path.iterdir()) == before
 
 
-def test_the_prd_section_11_interface_target_is_documented(capsys):
-    # PRD v2.0 section 11 names these flags. Declaring them keeps --help
-    # honest about the target shape while the command is still refused.
+def test_pending_command_options_match_the_declared_interface(capsys):
+    # Planned options remain discoverable even when execution is unavailable.
     expected = {
         "profile": ["--config", "--out"],
         "bench": ["--config", "--out"],
@@ -80,7 +78,7 @@ def test_report_is_implemented_and_the_rest_still_are_not():
     assert PENDING_NAMES == ["profile", "bench", "compare"]
 
 
-def test_report_accepts_the_prd_section_11_flags():
+def test_report_accepts_run_and_output_paths():
     args = build_parser().parse_args(["report", "--run", "runs/x", "--out", "reports/x.html"])
 
     assert str(args.run) == "runs/x"
@@ -88,8 +86,7 @@ def test_report_accepts_the_prd_section_11_flags():
 
 
 def test_memory_lab_commands_are_not_offered():
-    # PRD v2.0 section 10 gates the whole Memory Lab on a Week 7 review that
-    # has not happened; offering the commands would imply otherwise.
+    # Memory sweeps are outside the supported command interface.
     assert "memory-sweep" not in PENDING_NAMES
     assert "memory-report" not in PENDING_NAMES
 
@@ -399,3 +396,39 @@ def test_an_unexpected_error_is_not_swallowed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="kaboom"):
         main(["env"])
+
+
+class TestReportDoesNotOverwriteItsInput:
+    @pytest.mark.parametrize("name", ["steps.csv", "environment.json", "summary.json"])
+    def test_an_output_that_is_a_source_artifact_is_refused_with_one_line(
+        self, make_run, name, capsys
+    ):
+        run_dir = make_run()
+        before = (run_dir / name).read_bytes()
+
+        code = main(["report", "--run", str(run_dir), "--out", str(run_dir / name)])
+
+        assert code == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error: ")
+        assert err.count("\n") == 1
+        assert name in err
+        assert (run_dir / name).read_bytes() == before
+
+    def test_an_explicit_format_does_not_bypass_the_check(self, make_run, capsys):
+        run_dir = make_run()
+
+        code = main(
+            [
+                "report",
+                "--run",
+                str(run_dir),
+                "--out",
+                str(run_dir / "steps.csv"),
+                "--format",
+                "csv",
+            ]
+        )
+
+        assert code == 2
+        assert (run_dir / "steps.csv").read_text() == GOOD_STEPS_CSV

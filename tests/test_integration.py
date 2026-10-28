@@ -204,7 +204,7 @@ class TestTrainingFixtureProcess:
     def test_the_recorded_run_says_it_was_not_profiled(self, recorded_run):
         extra = json.loads((recorded_run / "environment.json").read_text(encoding="utf-8"))["extra"]
 
-        # Requirement SS-04: an artifact must say which side of the
+        # Measurement classification: an artifact must say which side of the
         # profiled/unprofiled split it came from, and `profiled` must be a
         # recorded false rather than a missing key read as one.
         assert extra["profiled"] is False
@@ -319,10 +319,10 @@ class TestUnimplementedScriptsRefuseCleanly:
     """
 
     @pytest.mark.parametrize("script", ["run_baseline.py", "compare.py"])
-    def test_they_exit_two_naming_gate_7_1(self, script):
+    def test_they_exit_two_naming_the_missing_benchmark_methodology(self, script):
         completed = _run([sys.executable, str(BENCHMARKS / script)])
 
-        _assert_refused_with_one_line(completed, contains="GATE 7.1")
+        _assert_refused_with_one_line(completed, contains="benchmark methodology")
         assert completed.stdout == ""
         assert "not implemented" in completed.stderr
 
@@ -344,6 +344,87 @@ class TestPendingCommandsRefuseCleanly:
 
         completed = _cli(command, *argv)
 
-        _assert_refused_with_one_line(completed, contains="GATE")
+        _assert_refused_with_one_line(
+            completed, contains="contract" if command == "profile" else "methodology"
+        )
         assert not target.exists()
         assert os.listdir(tmp_path) == []
+
+
+class TestRecordedBytes:
+    @requires_install
+    def test_the_csv_view_matches_the_recorded_file_byte_for_byte(self, recorded_run):
+        # Bytes, not text: text-mode capture translates CRLF to LF and would
+        # hide a producer that writes one while the renderer writes the other.
+        completed = subprocess.run(
+            [SHARDSCOPE, "report", "--run", str(recorded_run), "--format", "csv"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout == (recorded_run / "steps.csv").read_bytes()
+        assert b"\r\n" not in completed.stdout
+
+
+class TestValidateProcess:
+    """``shardscope validate`` as a spawned process against a real recording."""
+
+    @requires_install
+    def test_a_recorded_run_validates_and_writes_nothing(self, recorded_run):
+        before = {path.name: path.read_bytes() for path in sorted(recorded_run.iterdir())}
+
+        completed = _cli("validate", "--run", str(recorded_run))
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.startswith("valid run: ")
+        assert "5 row(s)" in completed.stdout
+        assert _error_lines(completed.stderr) == []
+        assert {p.name: p.read_bytes() for p in sorted(recorded_run.iterdir())} == before
+
+    @requires_install
+    def test_the_json_result_parses_and_agrees_with_the_recording(self, recorded_run):
+        completed = _cli("validate", "--run", str(recorded_run), "--format", "json")
+
+        assert completed.returncode == 0, completed.stderr
+        payload = json.loads(completed.stdout)
+        assert payload["ok"] is True
+        assert payload["steps"]["rows"] == 5
+        assert payload["summary"]["agrees_with_rows"] is True
+        assert payload["profiled"] is False
+
+    @requires_install
+    def test_a_damaged_recording_is_refused_with_one_line(self, recorded_run, tmp_path):
+        damaged = tmp_path / "damaged"
+        shutil.copytree(recorded_run, damaged)
+        summary = json.loads((damaged / "summary.json").read_text(encoding="utf-8"))
+        (damaged / "summary.json").write_text(
+            json.dumps({**summary, "steps": 500.0}), encoding="utf-8"
+        )
+
+        completed = _cli("validate", "--run", str(damaged))
+
+        _assert_refused_with_one_line(completed, contains="500")
+        assert completed.stdout == ""
+
+    @requires_install
+    def test_a_damaged_recording_in_json_mode_is_a_document_with_exit_two(
+        self, recorded_run, tmp_path
+    ):
+        damaged = tmp_path / "damaged"
+        shutil.copytree(recorded_run, damaged)
+        (damaged / "steps.csv").write_text("step,loss\n0,1.0\n", encoding="utf-8")
+
+        completed = _cli("validate", "--run", str(damaged), "--format", "json")
+
+        assert completed.returncode == 2
+        payload = json.loads(completed.stdout)
+        assert payload["ok"] is False
+        assert "missing required column" in payload["errors"][0]
+        assert _error_lines(completed.stderr) == []
+
+    @requires_install
+    def test_a_missing_directory_exits_two_with_one_line(self, tmp_path):
+        completed = _cli("validate", "--run", str(tmp_path / "absent"))
+
+        _assert_refused_with_one_line(completed, contains="no such run directory")

@@ -1,37 +1,23 @@
-"""Discover, load and validate the artifacts a ShardScope run writes.
+"""Discover, validate and serialize recorded training artifacts.
 
-A run directory is the unit every later stage consumes:
+A run contains ``steps.csv`` and ``environment.json``, with an optional
+``summary.json``. The reader accepts the single-device fixture schema;
+unsupported profiled columns are rejected rather than silently discarded.
 
-    runs/<run_id>/steps.csv          per-step records (requirement SS-03)
-    runs/<run_id>/environment.json   provenance (PRD v2.0 section 4)
-    runs/<run_id>/summary.json       descriptive statistics, as produced
-
-Scope boundary, deliberately narrow: this module understands exactly the
-artifact triple ``examples/train_single.py`` already writes. The *profiled*
-per-step schema -- ``data_wait_ms``, ``h2d_copy_ms`` and friends -- is an
-open student decision (GATE 3.1, GATE 3.2), so there is no loader for it
-here. A CSV carrying those columns is **refused**, not silently narrowed to
-the columns this module knows: quietly dropping a measured column is how a
-report comes to describe a run that did not happen.
-
-Two rules the validation follows:
-
-* Missing is missing. An absent ``summary.json`` loads as ``None`` and an
-  unrecorded ``profiled`` flag reads as ``None``; neither becomes ``0`` or
-  ``False`` (PRD v2.0 section 8 "Guardrails").
-* Provenance is preserved verbatim. ``environment.json`` is kept as the
-  mapping it was written as, including keys this version has never heard of,
-  so a report cannot silently shed the metadata that makes two runs
-  comparable.
+Missing summaries and profiling flags remain unknown. Provenance mappings retain
+unrecognized keys so serialization does not discard reproducibility metadata.
 """
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
 import math
-from collections.abc import Mapping, Sequence
+import os
+import secrets
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +36,7 @@ __all__ = [
     "load_run",
     "load_steps_csv",
     "looks_like_run",
+    "replace_file_contents",
     "steps_csv_text",
     "write_steps_csv",
 ]
@@ -72,14 +59,12 @@ STEP_COLUMNS = (
 _TRUE_VALUES = frozenset({"true", "1"})
 _FALSE_VALUES = frozenset({"false", "0"})
 
-#: Named in the error for an unrecognized column, so the reader learns that
-#: the column belongs to a schema nobody has approved yet rather than
-#: thinking this loader is simply out of date.
+#: Explain unsupported metric columns without silently discarding data.
 _UNKNOWN_COLUMN_HINT = (
-    "This loader understands only the Week 1 fixture schema. The profiled "
-    "per-step schema (data_wait_ms, h2d_copy_ms, ...) is still an open "
-    "decision -- GATE 3.1 (which fields are measured versus derived) and "
-    "GATE 3.2 (what data_wait_ms means operationally) -- so there is no "
+    "This loader understands only the schema examples/train_single.py writes. The profiled "
+    "per-step metric schema (data_wait_ms, h2d_copy_ms, ...) is not yet defined: "
+    "measured versus derived fields and loader-wait semantics need a contract. "
+    "There is no "
     "reader for it yet, and dropping the column would misreport the run"
 )
 
@@ -109,18 +94,23 @@ class StepRow:
         }
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> StepRow:
+    def from_dict(cls, payload: Any, *, where: str = "step record") -> StepRow:
         """Build a row from an already-typed mapping, validating it.
 
         The CSV loader and this one are two doors into the same record type,
         so they enforce the same rules: a JSON report is an input like any
         other, and a consumer that trusted it less than the CSV would be a
-        hole in the validation boundary.
+        hole in the validation boundary. ``where`` names the record in error
+        messages (``steps[4]`` for a serialized run).
         """
+        if not isinstance(payload, Mapping):
+            raise ArtifactError(
+                f"{where}: a step record must be a JSON object, got {type(payload).__name__}."
+            )
         missing = [name for name in STEP_COLUMNS if name not in payload]
         if missing:
             raise ArtifactError(
-                f"step record is missing field(s): {', '.join(missing)}. "
+                f"{where}: missing field(s): {', '.join(missing)}. "
                 f"Expected: {', '.join(STEP_COLUMNS)}."
             )
         return _checked_step(
@@ -129,7 +119,7 @@ class StepRow:
             step_time_ms=payload["step_time_ms"],
             data_residency=payload["data_residency"],
             synchronized=payload["synchronized"],
-            where="step record",
+            where=where,
         )
 
 
@@ -167,7 +157,7 @@ class RunArtifacts:
     def profiled(self) -> bool | None:
         """Whether this run was profiled; ``None`` when it was not recorded.
 
-        ``None`` is not ``False``. Requirement SS-04 turns on the difference:
+        ``None`` is not ``False``. The distinction affects measurement classification:
         a profiled step time must never be quoted as throughput, and a run
         whose profiling status was never written down cannot be declared
         safe to quote.
@@ -176,13 +166,26 @@ class RunArtifacts:
 
     @property
     def summary_step_count(self) -> int | None:
-        """``steps`` as recorded in ``summary.json``, or ``None`` if absent."""
+        """``steps`` as recorded in ``summary.json``, or ``None`` when unreadable.
+
+        The producer writes the count as a float (``3.0``), so an
+        integer-valued float is read as the integer it spells. Anything else
+        -- a string, a boolean, a fractional or non-finite number -- is
+        unknown rather than coerced: ``int(3.5)`` would let a damaged summary
+        agree with a three-row CSV, and ``int(nan)`` raises. The summary
+        itself is kept verbatim either way; this reports damage, it does not
+        repair it.
+        """
         if self.summary is None:
             return None
         value = self.summary.get("steps")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool):
             return None
-        return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            return int(value)
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -214,16 +217,23 @@ class RunArtifacts:
                 f"not a serialized run: missing key(s) {', '.join(missing)}. "
                 "Expected the output of RunArtifacts.to_dict()."
             )
-        environment = _validated_environment(payload["environment"], source="<serialized run>")
+        source = "<serialized run>"
+        path = payload["path"]
+        if not isinstance(path, str) or not path:
+            raise ArtifactError(
+                f"{source}: 'path' must be a non-empty string naming the run directory, "
+                f"got {path!r}."
+            )
+        environment = _validated_environment(payload["environment"], source=source)
         summary = payload.get("summary")
         if summary is not None:
-            summary = _require_json_object(summary, source="<serialized run>", label="summary")
+            summary = _require_json_object(summary, source=source, label="summary")
         return cls(
-            path=Path(payload["path"]),
-            steps=tuple(StepRow.from_dict(row) for row in payload["steps"]),
+            path=Path(path),
+            steps=_collect_rows(_serialized_rows(payload["steps"], source=source), source=source),
             environment=environment,
             summary=summary,
-            artifact_names=tuple(payload.get("artifact_names", ())),
+            artifact_names=_validated_artifact_names(payload.get("artifact_names", ()), source),
         )
 
 
@@ -282,8 +292,8 @@ def load_run(path: str | Path) -> RunArtifacts:
     environment_path = run_dir / ENVIRONMENT_JSON
     if not environment_path.is_file():
         raise ArtifactError(
-            f"{run_dir} has no {ENVIRONMENT_JSON}. That file is the run's provenance "
-            "(PRD v2.0 section 4): without it there is no record of the machine, "
+            f"{run_dir} has no {ENVIRONMENT_JSON}. That file is the run's provenance; "
+            "without it there is no record of the machine, "
             "versions or settings behind these numbers, and nothing can be judged "
             "comparable to anything. Re-run with --out-dir rather than reporting a "
             "run whose provenance was lost."
@@ -356,7 +366,7 @@ def load_steps_csv(path: str | Path) -> tuple[StepRow, ...]:
 
     reader = csv.reader(text.splitlines())
     try:
-        header = next(reader)
+        header = next(_csv_records(reader, target))
     except StopIteration as exc:
         raise ArtifactError(
             f"{target} is empty: no header row. Expected: {', '.join(STEP_COLUMNS)}."
@@ -364,33 +374,102 @@ def load_steps_csv(path: str | Path) -> tuple[StepRow, ...]:
 
     _validate_header(header, target)
 
+    parsed = (
+        (f"{target} row {offset}", _parse_row(values, target=target, row_number=offset))
+        for offset, values in enumerate(_csv_records(reader, target), start=2)
+        if values
+    )
+    return _collect_rows(parsed, source=str(target))
+
+
+def _csv_records(reader: Iterable[Sequence[str]], target: Path) -> Iterable[Sequence[str]]:
+    """Yield CSV records, turning the csv module's own failures into ours.
+
+    ``csv.reader`` raises :class:`csv.Error` for a field over its size limit
+    (128 KiB by default). That exception is not a :class:`ShardScopeError`,
+    so left alone it reaches the user as a traceback instead of naming the
+    file and line.
+    """
+    iterator = iter(reader)
+    while True:
+        try:
+            record = next(iterator)
+        except StopIteration:
+            return
+        except csv.Error as exc:
+            line = getattr(reader, "line_num", "?")
+            raise ArtifactError(
+                f"{target} line {line}: cannot be parsed as CSV ({exc}). A per-step CSV "
+                f"is plain comma-separated text with the columns {', '.join(STEP_COLUMNS)}; "
+                "this file is damaged or is not a per-step CSV."
+            ) from exc
+        yield record
+
+
+def _serialized_rows(payload: Any, *, source: str) -> Iterable[tuple[str, StepRow]]:
+    """Validate the ``steps`` array of a serialized run, record by record."""
+    if isinstance(payload, (str, bytes)) or not isinstance(payload, Sequence):
+        raise ArtifactError(
+            f"{source}: 'steps' must be a JSON array of step records, got {type(payload).__name__}."
+        )
+    for index, item in enumerate(payload):
+        where = f"{source} steps[{index}]"
+        yield where, StepRow.from_dict(item, where=where)
+
+
+def _collect_rows(items: Iterable[tuple[str, StepRow]], *, source: str) -> tuple[StepRow, ...]:
+    """Apply the sequence invariants every loader shares.
+
+    At least one row, and strictly increasing step indices. Both loaders --
+    the CSV file and the serialized JSON run -- go through here so the two
+    cannot drift apart on what a valid sequence of steps is. ``items`` pairs
+    each row with the location to name if it breaks the sequence.
+    """
     rows: list[StepRow] = []
-    previous_step: int | None = None
-    for offset, values in enumerate(reader, start=2):
-        if not values:
-            continue
-        row = _parse_row(values, target=target, row_number=offset)
-        if previous_step is not None:
-            if row.step == previous_step:
+    previous: int | None = None
+    for where, row in items:
+        if previous is not None:
+            if row.step == previous:
                 raise ArtifactError(
-                    f"{target} row {offset}: step {row.step} repeats the previous row. "
+                    f"{where}: step {row.step} repeats the previous row. "
                     "Each row must describe a different training step."
                 )
-            if row.step < previous_step:
+            if row.step < previous:
                 raise ArtifactError(
-                    f"{target} row {offset}: step {row.step} follows step {previous_step}. "
+                    f"{where}: step {row.step} follows step {previous}. "
                     "Steps must be increasing; a bounded capture window may skip "
                     "steps but never reorder them."
                 )
-        previous_step = row.step
+        previous = row.step
         rows.append(row)
 
     if not rows:
         raise ArtifactError(
-            f"{target} has a header but no step rows. A run with no measurements is a "
+            f"{source} has no step rows. A run with no measurements is a "
             "failed run, not an empty report."
         )
     return tuple(rows)
+
+
+def _validated_artifact_names(payload: Any, source: str) -> tuple[str, ...]:
+    """The run directory's file list: a JSON array of strings, possibly empty.
+
+    A string is itself iterable, so without this check ``"steps.csv"`` would
+    quietly become nine one-character file names, and a non-string item
+    would crash the renderer rather than be refused here.
+    """
+    if isinstance(payload, (str, bytes)) or not isinstance(payload, Sequence):
+        raise ArtifactError(
+            f"{source}: 'artifact_names' must be a JSON array of file names, "
+            f"got {type(payload).__name__}."
+        )
+    names = tuple(payload)
+    offenders = [name for name in names if not isinstance(name, str)]
+    if offenders:
+        raise ArtifactError(
+            f"{source}: 'artifact_names' must contain only strings, got {offenders[0]!r}."
+        )
+    return names
 
 
 def _validate_header(header: Sequence[str], target: Path) -> None:
@@ -496,6 +575,7 @@ def _require_number(
 ) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ArtifactError(f"{where}: column {column!r} must be a number, got {value!r}.")
+    _require_representable(value, where=where, column=column)
     if finite and not math.isfinite(value):
         raise ArtifactError(f"{where}: column {column!r} must be finite, got {value!r}.")
     if non_negative and value < 0:
@@ -505,8 +585,28 @@ def _require_number(
         )
 
 
+def _require_representable(value: int | float, *, where: str, column: str) -> None:
+    """Refuse an integer no float can hold.
+
+    JSON integers are unbounded, and both ``float(10**400)`` and
+    ``math.isfinite(10**400)`` raise ``OverflowError``. A value like that is
+    damage, not a measurement, and it has to be caught before any float
+    arithmetic touches it.
+    """
+    try:
+        float(value)
+    except OverflowError as exc:
+        shown = repr(value)
+        if len(shown) > 24:
+            shown = f"{shown[:24]}... ({len(shown)} digits)"
+        raise ArtifactError(
+            f"{where}: column {column!r} is too large to represent as a number: {shown}."
+        ) from exc
+
+
 def _parse_int(value: str, *, where: str, column: str) -> int:
     try:
+        _require_plain_spelling(value)
         return int(value)
     except ValueError as exc:
         raise ArtifactError(
@@ -517,9 +617,21 @@ def _parse_int(value: str, *, where: str, column: str) -> int:
 def _parse_float(value: str, *, where: str, column: str) -> float:
     """Convert one CSV cell to a float; range checks live in _checked_step."""
     try:
+        _require_plain_spelling(value)
         return float(value)
     except ValueError as exc:
         raise ArtifactError(f"{where}: column {column!r} must be a number, got {value!r}.") from exc
+
+
+def _require_plain_spelling(value: str) -> None:
+    """Reject numeric spellings only Python accepts.
+
+    ``int()`` and ``float()`` take ``1_0`` and non-ASCII digits. The
+    producer never writes either, so a cell like that is a hand edit, and
+    loading it as ``10`` would quietly accept a file that is not ours.
+    """
+    if "_" in value or not value.isascii():
+        raise ValueError(f"not a plain ASCII number: {value!r}")
 
 
 def _parse_bool(value: str, *, where: str, column: str) -> bool:
@@ -565,11 +677,68 @@ def write_steps_csv(path: str | Path, rows: Sequence[StepRow]) -> Path:
             f"refusing to write a per-step CSV with no rows: {path}. "
             "An empty CSV would read as a run that measured nothing."
         )
+    return replace_file_contents(path, steps_csv_text(rows))
+
+
+#: Attempts at an unused sibling name before giving up. A collision needs
+#: another writer to have picked the same 64-bit token in the same directory.
+_TEMP_NAME_ATTEMPTS = 8
+
+
+def replace_file_contents(path: str | Path, text: str) -> Path:
+    """Write ``text`` to ``path`` so no reader ever sees a partial file.
+
+    The text goes to a temporary file in the same directory, that file is
+    closed, and ``os.replace`` swaps it into place. What that does and does
+    not promise:
+
+    * A failed write -- a full disk, a permission that changed -- leaves a
+      previously valid ``path`` exactly as it was and removes the temporary
+      file. A concurrent reader sees the old contents or the new ones.
+    * It is a single-file guarantee. Writing three artifacts is three
+      replacements, not one transaction.
+    * Nothing is fsync'd: the swap is atomic against other readers, not
+      against power loss.
+    * The destination gets the permissions of a file newly created under
+      the current umask, not those of the file it replaced. The temporary
+      file is opened with ``os.open`` rather than :mod:`tempfile` for that
+      reason: ``tempfile`` creates ``0600`` files, which would turn a shared
+      report into a file with private permissions.
+    * ``newline=""`` and UTF-8, so the bytes on disk are the rendered text.
+    * A symlink at ``path`` is replaced by a regular file; whatever it pointed
+      at is left alone. Writing *through* a link is how an output path
+      quietly lands on a file the caller never named. For the same reason a
+      hard link to the old file keeps the old contents.
+
+    Missing parent directories are created. ``OSError`` propagates: the
+    caller knows what the file was for and can say so.
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="", encoding="utf-8") as handle:
-        handle.write(steps_csv_text(rows))
+    descriptor, temporary = _open_sibling_temp(target)
+    try:
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
     return target
+
+
+def _open_sibling_temp(target: Path) -> tuple[int, Path]:
+    """Create an exclusive, umask-respecting temporary file next to ``target``."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for _ in range(_TEMP_NAME_ATTEMPTS):
+        candidate = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            return os.open(candidate, flags, 0o666), candidate
+        except FileExistsError:
+            continue
+    raise OSError(  # pragma: no cover - needs eight 64-bit token collisions
+        f"could not create a temporary file next to {target} after {_TEMP_NAME_ATTEMPTS} attempts"
+    )
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -585,8 +754,16 @@ def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
         raise ArtifactError(f"cannot read {path}: {exc}") from exc
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError is one ValueError; an integer literal past
+        # CPython's 4300-digit limit is another, raised as a plain
+        # ValueError with no position.
         raise ArtifactError(f"{path} is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise ArtifactError(
+            f"{path} is nested too deeply to be read. A {label} artifact is a flat "
+            "JSON object; a document this deep is damaged or is not an artifact."
+        ) from exc
     return _require_json_object(payload, source=str(path), label=label)
 
 
@@ -613,7 +790,7 @@ def _validated_environment(payload: Any, *, source: str) -> dict[str, Any]:
         if not isinstance(profiled, bool):
             raise ArtifactError(
                 f"{source}: extra.profiled must be true or false, got {profiled!r}. "
-                "Requirement SS-04 depends on this flag, so a value that cannot be "
+                "Measurement classification depends on this flag, so a value that cannot be "
                 "read is refused rather than guessed."
             )
 

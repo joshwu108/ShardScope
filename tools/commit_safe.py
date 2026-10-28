@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Safe, auditable local commits for ShardScope (PRD v2.0 section 13.1).
+"""Create test-verified local commits with path and identity checks.
 
 What this script will do:
-  * confirm the repository's local git identity matches the identity the
-    student authorized;
+  * confirm the repository-local git identity matches the authorized author;
   * run the project's tests;
   * run ``git diff --check`` for whitespace/conflict damage;
   * stage only paths matching an explicit allowlist;
@@ -23,7 +22,7 @@ Usage::
     python tools/commit_safe.py --authorize   # write the auth file template
 
 Authorization lives in ``.shardscope-commit-auth.json`` (git-ignored) and
-must be created or edited by the student, not by an agent.
+must be enabled explicitly before automated commits are allowed.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ from pathlib import Path
 AUTH_FILE = ".shardscope-commit-auth.json"
 
 #: Paths that must never reach a commit, whatever the allowlist says.
-#: Mirrors the .gitignore policy in PRD v2.0 section 13.2.
+#: Keep local configuration, planning and generated artifacts out of commits.
 DENY_PATTERNS = (
     "*.md",
     "*.markdown",
@@ -76,7 +75,7 @@ DEFAULT_ALLOW_PATTERNS = (
 )
 
 AUTH_TEMPLATE = {
-    "_comment": "Student-owned authorization for tools/commit_safe.py. Edit by hand.",
+    "_comment": "Local authorization for tools/commit_safe.py. Enable explicitly.",
     "authorized": False,
     "author_name": "",
     "author_email": "",
@@ -108,7 +107,7 @@ def load_auth(root: Path) -> dict:
     if not path.exists():
         raise CommitRefused(
             f"missing {AUTH_FILE}. Run 'python tools/commit_safe.py --authorize',"
-            " then have the student fill in and approve it."
+            " then configure the author identity and enable local commits."
         )
     try:
         auth = json.loads(path.read_text(encoding="utf-8"))
@@ -129,7 +128,7 @@ def verify_identity(auth: dict) -> None:
     if not name or not email:
         raise CommitRefused(
             "local git identity is unset. Set 'git config --local user.name/.email'"
-            " to the student's verified identity before committing."
+            " to the configured author identity before committing."
         )
     if (name, email) != (auth["author_name"], auth["author_email"]):
         raise CommitRefused(
@@ -166,14 +165,13 @@ def partition(paths: list[str], allow_patterns) -> tuple[list[str], list[str]]:
 
 
 def assert_no_tracked_planning_files() -> None:
-    """PRD 12.3: .gitignore does not untrack files already tracked."""
+    """Ignore rules do not remove files that are already tracked."""
     tracked = run(["git", "ls-files"], check=False).stdout.split()
     offenders = [p for p in tracked if matches_any(p, DENY_PATTERNS)]
     if offenders:
         raise CommitRefused(
-            "these Markdown/planning paths are already tracked and need the student's"
-            " approval to 'git rm --cached' before automated commits are safe:\n  "
-            + "\n  ".join(offenders)
+            "these Markdown/planning paths are already tracked; review and remove them"
+            " from the index before enabling automated commits:\n  " + "\n  ".join(offenders)
         )
 
 
@@ -184,12 +182,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--authorize",
         action="store_true",
-        help=f"write a {AUTH_FILE} template for the student to fill in",
+        help=f"write a {AUTH_FILE} template for local commit configuration",
     )
     parser.add_argument(
         "--gpu-reviewed",
         action="store_true",
-        help="assert the student has reviewed and approved staged GPU-path changes",
+        help="confirm staged GPU-path changes have completed review",
     )
     parser.add_argument("--skip-tests", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -202,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{AUTH_FILE} already exists; leaving it untouched.")
                 return 0
             path.write_text(json.dumps(AUTH_TEMPLATE, indent=2) + "\n", encoding="utf-8")
-            print(f"wrote {path}. The student must set authorized=true and the identity.")
+            print(f"wrote {path}. Configure the author and set authorized=true to enable commits.")
             return 0
 
         if not args.message:
@@ -220,8 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         gpu_paths = [p for p in approved if matches_any(p, auth.get("gpu_review_required", []))]
         if gpu_paths and not args.gpu_reviewed:
             raise CommitRefused(
-                "these paths are marked GPU-review-required and need the student's explicit"
-                " sign-off (rerun with --gpu-reviewed once approved):\n  " + "\n  ".join(gpu_paths)
+                "these paths require a completed GPU review"
+                " (rerun with --gpu-reviewed after review):\n  " + "\n  ".join(gpu_paths)
             )
 
         if not args.skip_tests:

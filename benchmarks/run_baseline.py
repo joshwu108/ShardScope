@@ -1,11 +1,8 @@
-"""Warm, UNPROFILED throughput benchmark (requirement SS-04 / SS-06).
+"""Unprofiled throughput benchmark entry point.
 
-Status: STUB (Week 3 deliverable, hardened in Week 7).
-
-This script must never enable torch.profiler: profiling overhead would make
-its steps/s and examples/s numbers unusable as before/after evidence.
-It records warmup, repeats, median and p95 step time, examples/s and peak
-VRAM alongside the environment snapshot from ``shardscope.env``.
+Not implemented. Requires defined warmup, repeat and variance criteria before
+step rates, examples per second or peak memory can be reported. Benchmark runs
+must never enable torch.profiler because its overhead distorts throughput.
 """
 
 from __future__ import annotations
@@ -17,7 +14,7 @@ import sys
 #: two spellings of it would eventually disagree.
 BLOCKED_ON = (
     "the benchmark methodology -- warmup count, repeat count and the test used "
-    "to call a difference real (GATE 7.1) are student decisions"
+    "to distinguish a change from noise remain undefined"
 )
 
 
@@ -29,8 +26,7 @@ def main() -> int:
     waiting on a decision, and the message has to say which one.
     """
     print(
-        "error: benchmarks/run_baseline.py is not implemented yet -- it is a Week 3 "
-        f"deliverable. Blocked on: {BLOCKED_ON}",
+        f"error: benchmarks/run_baseline.py is not implemented yet. Blocked on: {BLOCKED_ON}",
         file=sys.stderr,
     )
     return 2

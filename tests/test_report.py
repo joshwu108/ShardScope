@@ -1,12 +1,7 @@
-"""Report rendering: availability, escaping, round trips, no-fabrication.
+"""Report availability, escaping and serialization tests.
 
-Two invariants carry most of these tests:
-
-* A report labels profiled diagnostic figures separately from unprofiled
-  throughput figures (requirement SS-04), and says so in words.
-* A measurement nobody recorded is rendered as absent, with the reason --
-  never as 0, never as an empty cell that reads like 0 (PRD v2.0 section 8
-  "Guardrails").
+Reports distinguish diagnostic timings from throughput measurements and show
+missing measurements explicitly rather than substituting numeric values.
 """
 
 from __future__ import annotations
@@ -51,7 +46,7 @@ def _with_extra(**items):
 
 
 class TestFieldAvailability:
-    def test_every_prd_core_report_field_gets_a_status(self, make_run):
+    def test_every_core_report_field_gets_a_status(self, make_run):
         run = load_run(make_run())
 
         assert tuple(status.field for status in field_statuses(run)) == REPORT_FIELDS
@@ -81,11 +76,14 @@ class TestFieldAvailability:
         assert status.state in (NOT_RECORDED, NOT_OBSERVED)
         assert len(status.detail) > 20, status.detail
 
-    @pytest.mark.parametrize("field", ["data_wait_ms", "suspected_bottleneck"])
-    def test_a_field_blocked_on_a_decision_names_the_gate(self, make_run, field):
-        # "Unimplemented" and "waiting on a decision the student owns" are
+    @pytest.mark.parametrize(
+        ("field", "dependency"),
+        [("data_wait_ms", "measurement contract"), ("suspected_bottleneck", "thresholds")],
+    )
+    def test_unavailable_analysis_names_the_missing_dependency(self, make_run, field, dependency):
+        # Missing implementations and undefined measurement contracts are
         # different states; the report must not blur them.
-        assert "GATE" in _status(load_run(make_run()), field).detail
+        assert dependency in _status(load_run(make_run()), field).detail
 
     def test_gpu_activity_is_not_observed_when_the_run_recorded_no_cuda_device(self, make_run):
         status = _status(load_run(make_run()), "gpu_activity")
@@ -106,7 +104,7 @@ class TestFieldAvailability:
 
         # The host could have produced kernel activity; nothing captured it.
         assert status.state == NOT_RECORDED
-        assert "GATE 2" in status.detail
+        assert "capture is unimplemented" in status.detail
 
     def test_collectives_are_not_observed_on_a_host_that_cannot_run_ddp(self, make_run):
         environment = {
@@ -154,7 +152,7 @@ class TestFieldAvailability:
         status = _status(run, "h2d_copy_ms")
 
         assert status.state == NOT_OBSERVED
-        assert "GATE 1.2" in status.detail
+        assert "data residency" in status.detail
         # Structurally absent is not zero milliseconds.
         assert "0 ms" not in status.detail
 
@@ -277,7 +275,7 @@ class TestHtmlReport:
         html = render_html(load_run(make_run(environment=_with_extra(profiled=True))))
 
         assert "profiled" in html.lower()
-        assert "SS-04" in html
+        assert "must not be quoted as throughput results" in html
 
     def test_an_unknown_profiling_status_is_not_rendered_as_unprofiled(self, make_run):
         extra = {k: v for k, v in GOOD_ENVIRONMENT["extra"].items() if k != "profiled"}
@@ -505,3 +503,128 @@ class TestWriteReport:
     def test_a_report_error_is_a_shardscope_error(self, make_run, tmp_path):
         with pytest.raises(ShardScopeError):
             write_report(load_run(make_run()), tmp_path / "r.html", fmt="pdf")
+
+
+class TestDamagedRecordedCounts:
+    @pytest.mark.parametrize("payload", ['{"steps": NaN}', '{"steps": 3.5}', '{"steps": 1e999}'])
+    def test_an_unreadable_count_renders_as_unknown_not_as_a_crash_or_agreement(
+        self, make_run, payload
+    ):
+        # int(nan) raises and int(3.5) is 3: the first crashed the renderer,
+        # the second made a damaged summary agree with a three-row CSV.
+        html = render_html(load_run(make_run(summary=payload)))
+
+        assert "no readable <code>steps</code> count" in html
+        assert "disagree" not in html
+
+    def test_the_damaged_value_is_still_shown_in_the_statistics_table(self, make_run):
+        # Unknown as a *count*, but the recorded value itself is evidence of
+        # the damage and stays visible verbatim.
+        html = render_html(load_run(make_run(summary={"steps": 3.5})))
+
+        assert "3.5" in html
+
+
+class TestWriteReportProtectsTheEvidence:
+    """``--out`` must never replace an artifact of the run being reported.
+
+    ``report --run runs/x --out runs/x/steps.csv`` would render the run and
+    then write the rendering over the evidence it came from. The check runs
+    before the output is opened and follows symlinks and relative aliases,
+    because those resolve to the same bytes on disk.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "fmt"),
+        [("steps.csv", "csv"), ("environment.json", "json"), ("summary.json", "json")],
+    )
+    def test_refuses_to_overwrite_a_source_artifact(self, make_run, name, fmt):
+        run_dir = make_run()
+        before = (run_dir / name).read_bytes()
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), run_dir / name, fmt=fmt)
+
+        assert (run_dir / name).read_bytes() == before
+
+    def test_refuses_a_relative_alias_of_a_source_artifact(self, make_run):
+        run_dir = make_run()
+        alias = run_dir / ".." / run_dir.name / "steps.csv"
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), alias, fmt="csv")
+
+    def test_refuses_a_symlink_to_a_source_artifact(self, make_run, tmp_path):
+        run_dir = make_run()
+        link = tmp_path / "elsewhere.csv"
+        link.symlink_to(run_dir / "steps.csv")
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), link, fmt="html")
+
+        assert (run_dir / "steps.csv").read_text() == GOOD_STEPS_CSV
+
+    def test_refuses_a_sidecar_artifact_too(self, make_run):
+        run_dir = make_run(extra_files=("trace_rank_0.json",))
+
+        with pytest.raises(ReportError, match="artifact of the run"):
+            write_report(load_run(run_dir), run_dir / "trace_rank_0.json", fmt="json")
+
+    def test_a_new_file_inside_the_run_directory_is_not_a_collision(self, make_run):
+        # Only existing evidence is protected; where a report goes is the
+        # caller's choice.
+        run_dir = make_run()
+
+        written = write_report(load_run(run_dir), run_dir / "report.html", fmt="html")
+
+        assert written.read_text().startswith("<!DOCTYPE html>")
+
+    def test_a_failed_replacement_preserves_the_previous_report(
+        self, make_run, tmp_path, monkeypatch
+    ):
+        import os
+
+        out = tmp_path / "report.html"
+        out.write_text("<!DOCTYPE html>previous, complete report")
+
+        def no_space(_src, _dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", no_space)
+
+        with pytest.raises(ReportError, match="cannot write"):
+            write_report(load_run(make_run()), out, fmt="html")
+
+        assert out.read_text() == "<!DOCTYPE html>previous, complete report"
+        assert [path.name for path in tmp_path.iterdir() if path.is_file()] == ["report.html"]
+
+    def test_the_csv_report_is_written_with_lf_endings_and_utf8(self, make_run, tmp_path):
+        name = "büro-サーバー"
+        run = load_run(make_run(environment={**GOOD_ENVIRONMENT, "platform": name}))
+
+        as_csv = write_report(run, tmp_path / "r.csv", fmt="csv")
+        as_html = write_report(run, tmp_path / "r.html", fmt="html")
+
+        assert b"\r\n" not in as_csv.read_bytes()
+        assert as_csv.read_bytes() == GOOD_STEPS_CSV.encode("utf-8")
+        assert name.encode("utf-8") in as_html.read_bytes()
+
+    def test_an_unanswerable_collision_check_refuses_rather_than_guessing(
+        self, make_run, tmp_path, monkeypatch
+    ):
+        # If the filesystem will not say whether two paths are the same file,
+        # writing anyway could be the overwrite the check exists to prevent.
+        from pathlib import Path
+
+        out = tmp_path / "report.html"
+        out.write_text("existing")
+
+        def denied(self, _other):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "samefile", denied)
+
+        with pytest.raises(ReportError, match="cannot check"):
+            write_report(load_run(make_run()), out, fmt="html")
+
+        assert out.read_text() == "existing"

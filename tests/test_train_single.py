@@ -1,12 +1,8 @@
-"""Tests for the Week 1 training fixture (requirement SS-01).
+"""Tests for the training fixture.
 
-What SS-01 actually demands, and therefore what these tests pin down:
-a tiny, reproducible PyTorch training example with fixed-seed synthetic
-input, able to run ~100 iterations and report per-step wall-clock time.
-
-Reproducibility is the load-bearing property. Every later ShardScope claim
-is a comparison between two runs, and a comparison is meaningless if the
-fixture itself drifts between runs.
+The fixture uses fixed-seed synthetic input, supports bounded training runs,
+and reports per-step wall-clock time. Repeated runs must preserve the input
+sequence and loss trajectory so timing comparisons use the same workload.
 """
 
 from __future__ import annotations
@@ -16,6 +12,7 @@ import dataclasses
 import json
 import math
 import os
+from pathlib import Path
 
 import pytest
 import torch
@@ -72,7 +69,7 @@ def test_model_maps_a_batch_to_class_logits():
 
 
 def test_model_is_small_enough_to_profile_quickly():
-    # PRD v2.0 section 5, SS-01: a *small* training example. Keeping this
+    # The training fixture must stay small. Keeping this
     # bounded keeps trace files and step times in the profiler's range.
     model = train_single.build_model(seed=0)
     parameters = sum(p.numel() for p in model.parameters())
@@ -147,8 +144,7 @@ def test_different_seeds_produce_different_loss_trajectories():
 
 @pytest.mark.parametrize("residency", ["host", "device"])
 def test_both_data_residency_modes_run(residency):
-    # GATE 1.2 is deliberately left open: both are implemented so the choice
-    # can be settled by measurement rather than by assumption.
+    # Both residency modes must preserve the requested placement policy.
     records = train_single.run_training(
         steps=3, batch_size=8, device="cpu", seed=0, data_residency=residency
     )
@@ -343,7 +339,7 @@ class TestMain:
         assert (tmp_path / "summary.json").is_file()
 
     def test_written_environment_records_that_the_run_was_not_profiled(self, tmp_path, capsys):
-        # Requirement SS-04: an artifact must say which side of the
+        # Measurement classification: an artifact must say which side of the
         # profiled/unprofiled split it came from.
         train_single.main(
             ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
@@ -478,13 +474,15 @@ class TestOutDirIsCheckedBeforeTraining:
         assert code == 2
         assert "No space left on device" in captured.err
         assert "This run is not recorded" in captured.err
-        # Not "nothing was written": the three files go out in sequence, so
-        # a mid-write failure leaves some of them behind.
-        assert "may hold an incomplete artifact set" in captured.err
+        # Not "nothing was written": the three files are swapped in one
+        # after another, so a failure between swaps leaves some of them
+        # behind -- possibly beside an earlier recording's files.
+        assert "incomplete" in captured.err
+        assert "earlier recording" in captured.err
 
 
 class TestConfigFile:
-    """``--config`` (PRD v2.0 section 11) and its precedence over flags."""
+    """Config loading and explicit CLI flag precedence."""
 
     @staticmethod
     def _config(tmp_path, payload) -> str:
@@ -554,7 +552,7 @@ class TestConfigFile:
 
     def test_the_written_environment_records_the_config_file_used(self, tmp_path, capsys):
         # Provenance: a replayed run must be traceable back to the file that
-        # described it (PRD v2.0 section 4, "Run contract").
+        # described it.
         path = self._config(tmp_path, {"steps": 2, "device": "cpu"})
         out_dir = tmp_path / "run"
 
@@ -584,3 +582,81 @@ def test_mps_usability_probe_returns_a_boolean():
     # Guards against the probe leaking a torch object or raising on a
     # platform without the backend.
     assert isinstance(train_single._mps_is_usable(), bool)
+
+
+class TestRunArtifactsLandWhole:
+    """Each artifact replaces its destination whole, and never as CRLF.
+
+    The reader and ``shardscope report --format csv`` emit ``\\n``; a
+    producer that wrote ``\\r\\n`` made the "byte-identical" promise true
+    only after newline translation. And ``--out-dir`` may be a directory
+    that already holds an earlier recording, so a failed write must leave
+    that recording intact rather than overwrite half of it.
+    """
+
+    def test_the_step_csv_uses_lf_line_endings(self, tmp_path):
+        records = train_single.run_training(steps=2, batch_size=8, device="cpu", seed=0)
+        target = tmp_path / "steps.csv"
+
+        train_single.write_step_csv(target, records)
+
+        raw = target.read_bytes()
+        assert b"\r\n" not in raw
+        assert raw.count(b"\n") == 3
+
+    def test_the_step_csv_text_matches_the_readers_rendering(self, tmp_path):
+        from shardscope.artifacts import load_steps_csv, steps_csv_text
+
+        records = train_single.run_training(steps=3, batch_size=8, device="cpu", seed=0)
+        target = tmp_path / "steps.csv"
+        train_single.write_step_csv(target, records)
+
+        assert target.read_bytes() == steps_csv_text(load_steps_csv(target)).encode("utf-8")
+
+    def test_a_failed_write_preserves_an_earlier_recording(self, tmp_path, capsys, monkeypatch):
+        earlier = {
+            "steps.csv": (
+                "step,loss,step_time_ms,data_residency,synchronized\n0,1.0,2.0,host,True\n"
+            ),
+            "environment.json": '{"earlier": true}\n',
+            "summary.json": '{"steps": 1.0}\n',
+        }
+        for name, text in earlier.items():
+            (tmp_path / name).write_text(text)
+
+        def no_space(_src, _dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", no_space)
+
+        code = train_single.main(
+            ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
+        )
+
+        assert code == 2
+        assert "not recorded" in capsys.readouterr().err
+        for name, text in earlier.items():
+            assert (tmp_path / name).read_text() == text
+        assert sorted(path.name for path in tmp_path.iterdir()) == sorted(earlier)
+
+    def test_the_artifacts_are_rendered_before_any_is_written(self, tmp_path, monkeypatch):
+        # The common failure -- a full disk -- strikes during the write. If
+        # the summary were only rendered after steps.csv had landed, a
+        # rendering failure would leave one new file beside two old ones.
+        written = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            written.append(Path(dst).name)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", spy)
+
+        assert (
+            train_single.main(
+                ["--steps", "2", "--device", "cpu", "--quiet", "--out-dir", str(tmp_path)]
+            )
+            == 0
+        )
+        assert written == ["steps.csv", "environment.json", "summary.json"]
+        assert sorted(path.name for path in tmp_path.iterdir()) == sorted(written)

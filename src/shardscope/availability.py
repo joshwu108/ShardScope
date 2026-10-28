@@ -1,28 +1,11 @@
-"""Which of the PRD's report fields a loaded run actually contains.
+"""Describe report-field availability using recorded artifacts.
 
-PRD v2.0 section 5 lists the core report fields: ``step_time_ms``,
-``data_wait_ms``, ``h2d_copy_ms``, ``gpu_activity``,
-``collective_activity``, ``per_rank_step_ms``, ``suspected_bottleneck``,
-``confidence_or_visibility``, ``evidence_refs``, ``profiled`` and
-``run_manifest``. Today's artifact triple carries three of them. This
-module answers, per field and *from the artifacts alone*, which of three
-things is true:
+``recorded`` means the run contains the field. ``not_recorded`` means capture
+or analysis did not produce it. ``not_observed`` means the recorded environment
+or data residency could not produce the activity.
 
-``recorded``
-    the run wrote it down, and the report shows the recorded value;
-``not_recorded``
-    nothing captured it -- usually because the capture or rule that would
-    produce it is unimplemented, and in several cases because the decision
-    defining it is still open (the detail names the GATE);
-``not_observed``
-    the run's own environment could not have produced it -- no CUDA device
-    for kernel activity, fewer than two for collectives, no per-step
-    host-to-device copy under device residency.
-
-The distinction is the point. "Nobody measured this yet" and "this machine
-cannot measure this" are different facts, and neither one is zero (PRD v2.0
-section 8 "Guardrails"). Nothing here interprets a measurement, applies a
-threshold or attributes an event: those are student-owned (GATE 4.1, 4.2).
+Absent measurements never become zero. This module reports availability only;
+it does not infer bottlenecks, apply thresholds, or assign confidence levels.
 """
 
 from __future__ import annotations
@@ -48,7 +31,7 @@ RECORDED = "recorded"
 #: Nothing captured the field. Not zero, and not a statement about the host.
 NOT_RECORDED = "not_recorded"
 
-#: PRD v2.0 section 5 "Core report fields", in the order the PRD lists them.
+#: Stable display order for report-field availability.
 REPORT_FIELDS = (
     "step_time_ms",
     "data_wait_ms",
@@ -81,7 +64,7 @@ class FieldStatus:
 
 
 def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
-    """Status for every PRD v2.0 section 5 core report field, in PRD order."""
+    """Availability of each report field in display order."""
     return tuple(_STATUS_BUILDERS[field](run) for field in REPORT_FIELDS)
 
 
@@ -106,10 +89,9 @@ def _data_wait_ms(run: RunArtifacts) -> FieldStatus:
         "data_wait_ms",
         NOT_RECORDED,
         "No loader-wait measurement exists in this run. The bounded profiler "
-        "capture that would produce one is unimplemented (GATE 2.1 schedule, "
-        "GATE 2.2 activity set, GATE 2.3 marker names), and what the field means "
-        "operationally -- time inside the load_data marker, or time the host "
-        "blocks on the loader iterator -- is GATE 3.2, an open student decision.",
+        "capture is unimplemented. Its schedule, activity set and phase markers "
+        "are undefined, as is the loader-wait measurement contract: a phase "
+        "duration and time blocked on the loader iterator are different metrics.",
     )
 
 
@@ -121,8 +103,8 @@ def _h2d_copy_ms(run: RunArtifacts) -> FieldStatus:
             NOT_OBSERVED,
             "This run used data_residency=device, which pre-places the whole "
             "dataset on the device, so no per-step host-to-device copy exists to "
-            "measure. The field is structurally absent rather than small "
-            "(GATE 1.2 keeps both residency modes available on purpose).",
+            "measure. This data residency makes the field structurally absent, "
+            "rather than a measured duration of zero.",
         )
     if len(residencies) > 1:
         return FieldStatus(
@@ -138,8 +120,8 @@ def _h2d_copy_ms(run: RunArtifacts) -> FieldStatus:
         NOT_RECORDED,
         "This run used data_residency=host, so a per-step host-to-device copy "
         "does happen, but nothing measured it separately from the step: the "
-        "profiler capture is unimplemented (GATE 2.1-2.3) and the per-step row "
-        "schema that would carry it is GATE 3.1.",
+        "profiler capture is unimplemented and the per-step metric schema "
+        "has not been defined.",
     )
 
 
@@ -163,7 +145,7 @@ def _gpu_activity(run: RunArtifacts) -> FieldStatus:
         NOT_RECORDED,
         f"This run recorded {count} CUDA device(s), so kernel activity was "
         "observable in principle, but no trace was captured: the bounded capture "
-        "is unimplemented (GATE 2.1-2.3) and its trace layout is GATE 2.4.",
+        "is unimplemented and its trace layout has not been defined.",
     )
 
 
@@ -179,16 +161,16 @@ def _collective_activity(run: RunArtifacts) -> FieldStatus:
             NOT_OBSERVED,
             f"This run's {ENVIRONMENT_JSON} records {count} CUDA device(s); a real "
             "DDP/NCCL job needs at least two. No collective could have been "
-            "observed, and PRD v2.0 section 8 forbids reporting distributed "
-            "results from a host that did not run them.",
+            "observed. Distributed measurements require "
+            "a host that actually ran the distributed workload.",
         )
     return FieldStatus(
         "collective_activity",
         NOT_RECORDED,
         f"This run recorded {count} CUDA device(s), but it is a single-device run "
-        "with no collective capture: DDP tracing is a Weeks 5-6 deliverable and is "
-        "unimplemented (GATE 5.1 synchronization strategy, GATE 5.2 straggler "
-        "injection). Overlapping collectives must never be summed into step time.",
+        "with no collective capture. DDP tracing requires a synchronization "
+        "strategy, a straggler fixture and compatible hardware. Overlapping "
+        "collectives must never be summed into step time.",
     )
 
 
@@ -197,8 +179,8 @@ def _per_rank_step_ms(run: RunArtifacts) -> FieldStatus:
         "per_rank_step_ms",
         NOT_RECORDED,
         f"{STEPS_CSV} carries no rank column: this is a single-device run. "
-        "Per-rank alignment arrives with the DDP block (Weeks 5-6), which is "
-        "unimplemented and hardware-gated.",
+        "Per-rank alignment arrives with the DDP block, which is unimplemented and "
+        "hardware-gated.",
     )
 
 
@@ -207,7 +189,7 @@ def _suspected_bottleneck(run: RunArtifacts) -> FieldStatus:
         "suspected_bottleneck",
         NOT_RECORDED,
         "No diagnosis is attached to this run. The rule engine is unimplemented, "
-        "and its thresholds are GATE 4.1 -- a student-owned decision. This report "
+        "and its thresholds remain undefined. This report "
         "presents recorded measurements only; it does not attribute a cause.",
     )
 
@@ -217,8 +199,7 @@ def _confidence_or_visibility(run: RunArtifacts) -> FieldStatus:
         "confidence_or_visibility",
         NOT_RECORDED,
         "No confidence label is attached to this run. The vocabulary a rule may "
-        "emit, and the evidence each level requires, is GATE 4.2 -- a "
-        "student-owned decision this report must not pre-empt by inventing one.",
+        "emit, and the evidence each level requires, remain undefined.",
     )
 
 
@@ -230,9 +211,8 @@ def _evidence_refs(run: RunArtifacts) -> FieldStatus:
             NOT_RECORDED,
             "Trace file(s) are present in the run directory -- "
             f"{', '.join(traces)} -- but this report does not read them: the trace "
-            "parser is unimplemented and the event schema it would key off is "
-            "GATE 2.3/3.1. They are listed so the evidence is not lost, not "
-            "interpreted.",
+            "parser is unimplemented and the phase markers and metric schema "
+            "are undefined. Listing a trace does not imply it has been analyzed.",
         )
     return FieldStatus(
         "evidence_refs",
@@ -249,24 +229,22 @@ def _profiled(run: RunArtifacts) -> FieldStatus:
             "profiled",
             NOT_RECORDED,
             f"extra.profiled is absent from {ENVIRONMENT_JSON}, so whether the "
-            "profiler was attached is unknown for this run. Requirement SS-04 "
-            "separates diagnostic from throughput figures, and an unknown status "
-            "cannot be read as either one.",
+            "profiler was attached is unknown for this run. These timings cannot "
+            "be classified as diagnostic or throughput measurements.",
         )
     if status:
         return FieldStatus(
             "profiled",
             RECORDED,
-            "extra.profiled is true: these are diagnostic figures carrying "
-            "profiler overhead. Requirement SS-04 forbids quoting them as "
-            "throughput results.",
+            "extra.profiled is true: these diagnostic timings include profiler "
+            "overhead and cannot be quoted as throughput results.",
         )
     return FieldStatus(
         "profiled",
         RECORDED,
         "extra.profiled is false: no profiler was attached. These step times still "
         "come from a timed fixture run, not from the warm repeated benchmark "
-        "harness (GATE 7.1, unimplemented), so they are not throughput results "
+        "harness (benchmark methodology not implemented), so they are not throughput results "
         "either.",
     )
 
@@ -279,10 +257,7 @@ def _run_manifest(run: RunArtifacts) -> FieldStatus:
         "run_manifest",
         RECORDED,
         f"Provenance for this run is {ENVIRONMENT_JSON} (a RunEnvironment dump plus "
-        f"the run's settings). Artifacts found: {', '.join(present)}. PRD v2.0 "
-        "section 11 names run.json for this role; the producer writes "
-        f"{ENVIRONMENT_JSON} today, and this report reads what exists rather than "
-        "renaming it.",
+        f"the run's settings). Artifacts found: {', '.join(present)}.",
     )
 
 
@@ -332,7 +307,7 @@ def _no_inventory_detail(problem: str) -> str:
         f"This run did not record a readable CUDA device inventory: {problem}. "
         "Whether this activity could have been observed therefore cannot be "
         "judged from the run's own provenance, and nothing captured it either "
-        "(the bounded capture is unimplemented, GATE 2.1-2.3). Treating the "
+        "(bounded capture is unimplemented). Treating the "
         "absent inventory as zero devices would state a fact the run never "
         "recorded."
     )

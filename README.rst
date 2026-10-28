@@ -23,6 +23,9 @@ Early. Implemented today:
   later profiling runs measure. Runs on CPU, MPS or CUDA; emits per-step
   CSV plus an environment and summary sidecar.
 * Run configuration files, validated before anything executes.
+* ``shardscope validate`` -- says whether a run directory is a recording
+  that can be reported, and what it does and does not contain. Writes
+  nothing.
 * ``shardscope report`` -- renders a recorded run as HTML, JSON or CSV,
   including a field-by-field statement of what the run does *not* contain.
 
@@ -105,11 +108,15 @@ reader of its stdout pipe hangs up.
 
 A refused command writes nothing: bad arguments, an invalid config and an
 unusable ``--out-dir`` are all caught before the first training step, and a
-report is rendered in full before the output file is opened. The one case
-that can still leave a half-written run directory is a write that fails
-partway through the three artifacts -- a full disk, say. The fixture says so
-and names the directory, and ``shardscope report`` then refuses the
-incomplete run rather than describing it.
+report is rendered in full before the output file is opened. Each artifact
+is written to a temporary file beside its destination and swapped in whole,
+so a file is never left half-written. The three swaps are not one
+transaction, though: a failure between them -- a full disk, say -- can leave
+the directory with fewer than three files or, if it already held an earlier
+recording, with files from two runs. The fixture says so and names the
+directory; ``shardscope report`` refuses a missing file and flags a
+step-count disagreement, but cannot tell two complete recordings apart
+beyond that, so treat the directory as unrecorded and repeat the run.
 
 The training fixture
 ====================
@@ -200,15 +207,14 @@ What the report will not do:
 * It computes nothing. Every number in it came from an artifact in the run
   directory. ``summary.json`` is shown as produced; if it is absent, the
   report says so instead of recomputing a replacement.
-* It never fills a gap with zero. Each core report field from the PRD gets
-  one of three states: *recorded*, *not recorded* (nothing captured it, and
-  where a decision is pending the text names the open GATE), or
+* It never fills a gap with zero. Each report field gets one of three
+  states: *recorded*, *not recorded* (nothing captured it, and
+  the text identifies missing capture or analysis dependencies), or
   ``not_observed`` (this run's own environment could not have produced it --
   no CUDA device for kernel activity, fewer than two for collectives, no
   per-step host-to-device copy under ``--data-residency device``).
-* It attaches no diagnosis, threshold or confidence label. Those are open
-  decisions, and a report that invented one would be putting words in the
-  author's mouth.
+* It attaches no diagnosis, threshold or confidence label. Those measurement
+  contracts are not yet defined; rendering does not infer replacements.
 * It does not reconcile artifacts that disagree. The per-step row count and
   ``summary.json``'s ``steps`` are shown side by side, and a mismatch is
   flagged rather than quietly resolved.
@@ -229,6 +235,54 @@ A per-step CSV carrying columns this version does not know -- the profiled
 schema, for instance -- is refused rather than loaded with those columns
 dropped, because a silently narrowed file would produce a report describing a
 run that did not happen.
+
+``--out`` may not name an artifact of the run being reported. ``--out
+runs/baseline/steps.csv`` would replace the evidence with a rendering of it,
+so it is refused before the file is opened, and so is a symlink or relative
+alias that resolves to the same file. Elsewhere, an existing report is
+replaced whole: the new document is written to a temporary file beside it
+and swapped in, so a write that fails partway -- a full disk -- leaves the
+previous report intact rather than truncated. That is a single-file
+guarantee against partial writes, not durability against power loss.
+
+Validating a run
+================
+
+``shardscope validate`` answers one question about a run directory: can it
+be reported? It loads the directory exactly as ``report`` does, renders
+nothing, writes nothing, and prints what it found.
+
+.. code-block:: console
+
+   $ shardscope validate --run runs/baseline
+   valid run: runs/baseline
+     steps.csv         100 row(s), steps 0..99, synchronized=true, data_residency=host
+     environment.json  present; extra.profiled=false
+     summary.json      present; steps=100, agrees with steps.csv
+     files             environment.json, steps.csv, summary.json
+     fields            3 recorded, 2 not_observed, 6 not recorded (shardscope report explains each)
+     warnings          none
+
+An absent ``summary.json`` is valid and is said to be absent; no statistic
+is computed in its place. A run whose ``environment.json`` does not record
+``extra.profiled``, or whose rows were measured under different
+``synchronized`` or ``data_residency`` settings, validates with a warning
+that says so. Warnings never become defaults.
+
+Two things fail validation, with the project's usual one line on stderr and
+exit code 2: a directory that will not load (the same message ``report``
+would print), and a ``summary.json`` whose ``steps`` disagrees with the row
+count of ``steps.csv``. ``report`` renders that disagreement, because a
+report describes what is on disk; ``validate`` refuses it, because two
+artifacts that describe different runs cannot be vouched for as one
+recording. Neither number is adjusted in either command.
+
+``--format json`` writes the same result as a document for automation --
+``ok``, ``errors``, ``warnings``, the row and step range, the recorded step
+count and whether it agrees, ``profiled``, the file list and the per-field
+availability statuses. It carries no statistic. On a failure the document
+is still written, with ``ok: false`` and the error inside it, and the exit
+code is still 2.
 
 Honest-measurement rules
 ========================
@@ -300,6 +354,13 @@ Troubleshooting
   ``--run`` wants one run directory, not the parent that holds several. The
   message lists the run directories it found underneath.
 
+``error: <dir>: summary.json records steps=N but steps.csv has M row(s)``
+  From ``shardscope validate``. The two artifacts were written separately
+  and one of them does not describe this run -- usually a run directory
+  that was reused and partly overwritten. ``shardscope report`` will still
+  render it and flag the disagreement; do not treat it as a recording.
+  Repeat the run into a fresh directory.
+
 ``error: <file>: unexpected column(s): data_wait_ms``
   The CSV uses the profiled schema, which has no reader yet. The message
   names the open decisions. The column is not dropped, because a silently
@@ -311,10 +372,18 @@ Troubleshooting
 
 ``error: the run finished but its artifacts could not be written to <dir>``
   The run is not recorded and has to be repeated. Usually a full disk or a
-  permission change during the run. The three files are written in
-  sequence, so the directory may hold an incomplete set;
-  ``shardscope report`` refuses such a directory rather than rendering a
-  run that was not fully recorded.
+  permission change during the run. Each file lands whole or not at all,
+  but the three are swapped in one after another, so the directory may
+  hold an incomplete set or -- if it already held an earlier recording --
+  a mix of two runs' files. ``shardscope report`` refuses a missing file
+  and flags a step-count disagreement; it cannot detect a mix that agrees
+  on the count, so do not report from the directory.
+
+``error: refusing to write the report over <file>: --out names an artifact of the run``
+  ``--out`` points at ``steps.csv``, ``environment.json``, ``summary.json``
+  or another file inside the run directory being reported (possibly through
+  a symlink). Write the report somewhere else; the run directory is the
+  evidence and is never overwritten by the tool that reads it.
 
 ``error: cannot tell the report format from 'x.pdf'``
   Use an ``.html``, ``.htm``, ``.json`` or ``.csv`` suffix, or pass
@@ -355,8 +424,8 @@ authority; this paragraph is prose about it.
 
 ``smoke`` is the end-to-end gate: it checks the console script's version
 against the installed distribution, runs ``shardscope env``, runs the
-training fixture with and without ``--config``, and renders a real recorded
-run to HTML. ``tests/test_integration.py`` covers the same path as spawned
+training fixture with and without ``--config``, validates a real recorded
+run and renders it to HTML. ``tests/test_integration.py`` covers the same path as spawned
 processes and asserts on the output rather than only the exit codes.
 
 Tests that need hardware this machine lacks are marked ``gpu`` or
@@ -366,7 +435,7 @@ Local commit workflow
 =====================
 
 Automated local commits are opt-in and run through a guarded helper. After
-cloning, regenerate the git-ignored agent commit skill:
+cloning, regenerate the local commit workflow:
 
 .. code-block:: console
 
@@ -382,12 +451,11 @@ amends, or force-pushes.
 Two things that look like failures and are not:
 
 * ``bootstrap_commit_skill.py`` exits ``3`` when the reference committing
-  convention named in the PRD is absent from this machine. The skill is
-  still written, carrying a banner that says it was not reconciled. CI
-  treats ``3`` as the expected state rather than papering over it.
+  convention is absent. The workflow is still generated from the local
+  template, with the missing reference noted. CI accepts this status.
 * ``--authorize`` refuses to touch an existing authorization file, and the
   template it creates has ``authorized: false``. Enabling automated commits
-  is a hand edit by the repository owner, never an agent's own decision.
+  requires explicit local configuration of the author identity and authorization.
 
 Repository layout
 =================
@@ -395,7 +463,8 @@ Repository layout
 .. code-block:: text
 
    src/shardscope/     cli, env, config, errors, artifacts, availability,
-                       report/html_report; capture/parse/rules skeletons
+                       validate, report/html_report; capture/parse/rules
+                       skeletons
    examples/           train_single.py, train_ddp.py
    benchmarks/         unprofiled throughput harness and comparisons
    tests/              unit and integration tests
