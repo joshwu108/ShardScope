@@ -2,482 +2,309 @@
 ShardScope
 ==========
 
-Distributed training bottleneck profiler for PyTorch.
+Training-run inspection tools for PyTorch, with distributed bottleneck
+profiling in development.
 
-ShardScope records what the CPU, data loader, GPUs, and GPU-to-GPU
-communication do during a bounded window of training steps, then reports
-where each step loses time, which rank is waiting, and what change might
-help. You verify any suggestion by rerunning a separate, unprofiled
-throughput benchmark.
+ShardScope currently records a reproducible single-device training fixture,
+validates its artifacts, and renders reports with per-step timings and
+execution metadata. CPU development requires no GPU setup.
 
-It is a diagnostic scanner, not an autotuner.
+Profiler capture, trace analysis, bottleneck diagnosis, throughput benchmarks,
+and DDP execution are not implemented. The ``profile``, ``bench``, and
+``compare`` commands expose their planned options but exit with a dependency
+message and produce no artifacts.
 
-Status
-======
+Development setup
+=================
 
-Early. Implemented today:
+The package supports Python 3.10-3.12. CI runs on Linux with Python 3.10 and
+3.12. Runtime dependencies are PyTorch and NumPy; the ``dev`` extra installs
+pytest, coverage, Ruff, and docutils.
 
-* ``shardscope env`` -- reproducibility snapshot (Python, PyTorch, CUDA,
-  cuDNN, NCCL, device inventory, whether this host can run DDP at all).
-* ``examples/train_single.py`` -- the tiny fixed-seed training fixture that
-  later profiling runs measure. Runs on CPU, MPS or CUDA; emits per-step
-  CSV plus an environment and summary sidecar.
-* Run configuration files, validated before anything executes.
-* ``shardscope validate`` -- says whether a run directory is a recording
-  that can be reported, and what it does and does not contain. Writes
-  nothing.
-* ``shardscope report`` -- renders a recorded run as HTML, JSON or CSV,
-  including a field-by-field statement of what the run does *not* contain.
-
-Declared but **not implemented**: ``shardscope profile``, ``bench`` and
-``compare``. Their flags appear in ``--help`` so the target interface is
-visible, but invoking one exits non-zero and names the decision it is
-waiting on. They do not produce partial output or empty run directories.
-
-``shardscope --help`` lists the current state of every command.
-
-Install
-=========
-
-Requires Python 3.10-3.12 -- the range PyTorch publishes wheels for, and the
-range CI tests (3.10 and 3.12 legs). On Apple silicon the interpreter must be
-``arm64``; x86_64 Python has no modern PyTorch wheel. Check with
-``python -c "import platform; print(platform.machine())"``.
+From a checkout:
 
 .. code-block:: console
 
    $ uv venv --python 3.12 .venv
    $ source .venv/bin/activate
    $ uv pip install -e ".[dev]"
-
-``pip`` works identically if you prefer it: ``python -m venv .venv`` then
-``pip install -e ".[dev]"``. The ``dev`` extra adds pytest, pytest-cov, ruff
-and docutils, which are what ``tools/dev.py`` needs; without it the test and
-lint gates cannot run.
-
-Verify the install -- both commands must agree on the version:
-
-.. code-block:: console
-
    $ shardscope --version
-   shardscope 0.0.1
-   $ shardscope env
-   ShardScope environment
-     python          3.12.14
-     platform        macOS-27.0-arm64-arm-64bit
-     machine         arm64
-     torch           2.14.1
-     accelerator     mps
-     cuda            not available
-     cudnn           not available
-     nccl            not available
-     cuda devices    0
-     ddp capable     False
-     note            DDP/NCCL results must not be reported from this host.
+   $ python tools/dev.py smoke
 
-The values above are this machine's. ``ddp capable`` is the gate on any
-multi-GPU claim: if it says ``False``, no DDP or NCCL result may be reported
-from this host.
-
-``python tools/dev.py smoke`` checks the same thing and more, including that
-the console script on ``PATH`` and the package this interpreter imports are
-the same install.
-
-Quick start
-===========
-
-Record a run, then render it. These are two separate commands because a run
-is an artifact: it is produced once and read many times.
+With pip, create the environment using a supported interpreter:
 
 .. code-block:: console
 
-   $ python examples/train_single.py --steps 100 --device auto --quiet --out-dir runs/baseline
-   device=mps residency=host synchronized=True seed=0
-   steps=100 median=1.511 ms p95=2.342 ms min=1.294 ms max=355.430 ms
-   wrote runs/baseline/steps.csv, environment.json, summary.json
-   $ shardscope report --run runs/baseline --out reports/baseline.html
-   wrote reports/baseline.html (html) from runs/baseline
+   $ python3.12 -m venv .venv
+   $ source .venv/bin/activate
+   $ python -m pip install -e ".[dev]"
 
-Those step times are one machine's, from one timed fixture run. They are not
-throughput results and not a benchmark -- see `Honest-measurement rules`_.
-Drop ``--quiet`` to see a line per step.
+Keep the virtual environment active when running commands below. On Apple
+silicon, use an ARM64 interpreter. ``shardscope env`` reports the detected
+backend and library versions; it does not run a hardware validation job.
 
-Every command exits ``0`` on success, ``2`` for a mistake you can fix (a bad
-path, an invalid config, an unimplemented command), and ``141`` when the
-reader of its stdout pipe hangs up.
+Record, validate, report
+========================
 
-A refused command writes nothing: bad arguments, an invalid config and an
-unusable ``--out-dir`` are all caught before the first training step, and a
-report is rendered in full before the output file is opened. Each artifact
-is written to a temporary file beside its destination and swapped in whole,
-so a file is never left half-written. The three swaps are not one
-transaction, though: a failure between them -- a full disk, say -- can leave
-the directory with fewer than three files or, if it already held an earlier
-recording, with files from two runs. The fixture says so and names the
-directory; ``shardscope report`` refuses a missing file and flags a
-step-count disagreement, but cannot tell two complete recordings apart
-beyond that, so treat the directory as unrecorded and repeat the run.
-
-The training fixture
-====================
-
-``examples/train_single.py --help`` lists every knob. Two switches exist
-because they change what the number *means*, not just how fast it is:
-
-``--no-sync``
-  Stops synchronizing the device around each step. Timings then measure
-  kernel launch rather than execution, and the run says so in its output.
-  On an M4 Max this reads roughly half the synchronized step time -- which
-  is how a bogus speedup gets published.
-
-``--data-residency {host,device}``
-  ``host`` copies each batch to the device per step, so a host-to-device
-  transfer exists and can be measured. ``device`` pre-places the whole
-  dataset, so no such transfer exists at all. Both paths train on identical
-  batches in an identical order, so their step times are comparable.
-
-Run configuration files
-=======================
-
-Any run knob can come from a JSON file instead of a flag, so a recorded run
-can be replayed from its own provenance:
+Run the complete artifact workflow on CPU:
 
 .. code-block:: console
 
-   $ cat examples/configs/cpu_baseline.json
+   $ python examples/train_single.py --device cpu --steps 20 --quiet --out-dir runs/cpu-check
+   $ shardscope validate --run runs/cpu-check
+   $ shardscope report --run runs/cpu-check --out reports/cpu-check.html
+
+Open ``reports/cpu-check.html`` in a browser. It contains the recorded
+summary, step rows, provenance, and availability of each report field.
+HTML reports use inline styles and require no scripts or network access.
+
+Use a fresh run directory for each recording. Fixture timings describe this
+workload on this machine; they are not throughput benchmark results.
+
+Commands
+========
+
+.. list-table:: Current CLI
+   :header-rows: 1
+   :widths: 25 55 20
+
+   * - Command
+     - Purpose
+     - Status
+   * - ``env``
+     - Capture interpreter, PyTorch, accelerator, and device metadata.
+     - Implemented
+   * - ``validate --run DIR``
+     - Check recorded artifacts and report inconsistencies.
+     - Implemented
+   * - ``report --run DIR``
+     - Render a run as HTML, JSON, or CSV.
+     - Implemented
+   * - ``profile``
+     - Capture a bounded training window with phase markers.
+     - Not implemented
+   * - ``bench``
+     - Measure unprofiled throughput after warmup.
+     - Not implemented
+   * - ``compare``
+     - Compare benchmark results against run-to-run variation.
+     - Not implemented
+
+Use ``shardscope --help`` or ``shardscope COMMAND --help`` for options.
+
+.. code-block:: console
+
+   $ shardscope env --format json
+   $ shardscope validate --run runs/cpu-check --format json
+   $ shardscope report --run runs/cpu-check --out reports/cpu-check.json
+   $ shardscope report --run runs/cpu-check --format csv > reports/cpu-check.csv
+
+Report format follows the output suffix: ``.html``, ``.htm``, ``.json``, or
+``.csv``. ``--format`` overrides it. Without ``--out``, output goes to stdout
+and defaults to HTML. ``--max-rows`` limits the HTML step table; JSON and CSV
+retain every row.
+
+Validation exits ``0`` when the run loads and its readable summary count
+agrees with the CSV. Missing optional summaries, unknown profiling status,
+and mixed measurement policies are reported without inventing replacements.
+A recorded count mismatch fails validation; a report still shows both counts
+and flags the disagreement.
+
+``validate --format json`` emits ``ok``, ``errors``, ``warnings``, artifact
+metadata, and field availability. Validation failures return a JSON document
+with ``ok: false`` and exit code ``2``.
+
+Run configuration
+=================
+
+The fixture accepts a JSON config and explicit CLI overrides:
+
+.. code-block:: console
+
+   $ python examples/train_single.py --config examples/configs/cpu_baseline.json --steps 20 --quiet
+
+Supported keys and defaults:
+
+.. code-block:: json
+
    {
-     "_comment": "Single-device CPU baseline. ...",
      "steps": 100,
      "batch_size": 64,
      "samples": 2048,
      "seed": 0,
      "learning_rate": 0.01,
-     "device": "cpu",
+     "device": "auto",
      "data_residency": "host",
      "synchronize": true
    }
-   $ python examples/train_single.py --config examples/configs/cpu_baseline.json --quiet
 
-Keys beginning with ``_`` are ignored, so a config can carry notes.
-Explicitly passed flags override the file; omitted flags do not. The config
-path is recorded in the run's ``environment.json``.
+Explicit flags override file values. Keys starting with ``_`` are ignored;
+other unknown keys and invalid values are rejected before training starts.
+The config path and resolved settings are recorded in ``environment.json``.
 
-Validation happens before training starts, and says what to fix:
+``--device`` accepts ``cpu``, ``mps``, ``cuda``, or ``auto``. Automatic
+selection prefers CUDA, then MPS, then CPU. Use ``--device cpu`` for local
+development that should not depend on an accelerator.
 
-.. code-block:: console
+``--data-residency host`` copies each batch to the selected device during
+the step. ``device`` places the dataset there before training. Both modes
+use the same seeded batch sequence.
 
-   $ python examples/train_single.py --config bad.json
-   error: bad.json: unknown config key 'devcie'. Did you mean 'device'? Known
-   keys: steps, batch_size, samples, seed, learning_rate, device,
-   data_residency, synchronize.
-   $ echo $?
-   2
+Device synchronization is enabled by default. ``--no-sync`` removes the
+explicit synchronization around each step; on accelerators, those timings
+must not be interpreted as completed device execution time. Reports preserve
+the synchronization and residency policies alongside the recorded values.
 
-Profiler settings -- the capture schedule, the activity set and the phase
-marker names -- are deliberately **not** configurable yet. Those define what
-a measurement means, and are not settled.
+Artifact contract
+=================
 
-Reporting a run
-===============
+.. code-block:: text
 
-A run directory is whatever ``--out-dir`` wrote: ``steps.csv``,
-``environment.json`` and ``summary.json``. ``shardscope report`` renders it.
+   runs/<run-id>/
+     steps.csv          required: per-step records
+     environment.json   required: execution metadata and run settings
+     summary.json       optional for readers: recorded statistics
 
-.. code-block:: console
+The fixture writes all three files. Readers accept an absent summary and
+preserve that absence. The current CSV schema is:
 
-   $ python examples/train_single.py --steps 100 --device cpu --out-dir runs/baseline
-   $ shardscope report --run runs/baseline --out reports/baseline.html
-   wrote reports/baseline.html (html) from runs/baseline
+.. code-block:: text
 
-The format follows the output suffix (``.html``, ``.htm``, ``.json``,
-``.csv``) and ``--format`` overrides it. Without ``--out`` the report goes to
-stdout, which makes ``--format csv`` and ``--format json`` usable in a pipe.
-``--max-rows`` caps the per-step table in the HTML view; a truncated table
-says how many rows it is hiding and that the rest are in ``steps.csv``. The
-``json`` and ``csv`` views always carry every row.
+   step,loss,step_time_ms,data_residency,synchronized
 
-The HTML report is one self-contained file: no scripts, no stylesheets, no
-network references. Everything interpolated into it -- provenance strings,
-file names, config paths -- is HTML-escaped, because a run can carry
-arbitrary text from the program that was profiled and a report is the
-artifact that gets shared.
+Step indices must increase without duplicates. Durations must be finite and
+non-negative. Unsupported columns are rejected rather than dropped.
+Provenance retains unrecognized keys so a round trip does not discard metadata.
 
-What the report will not do:
+Reports render recorded statistics without recomputing them. Field availability
+uses three states: ``recorded``, ``not_recorded``, and ``not_observed``. Unknown
+values remain unknown; missing activity is never substituted with zero.
 
-* It computes nothing. Every number in it came from an artifact in the run
-  directory. ``summary.json`` is shown as produced; if it is absent, the
-  report says so instead of recomputing a replacement.
-* It never fills a gap with zero. Each report field gets one of three
-  states: *recorded*, *not recorded* (nothing captured it, and
-  the text identifies missing capture or analysis dependencies), or
-  ``not_observed`` (this run's own environment could not have produced it --
-  no CUDA device for kernel activity, fewer than two for collectives, no
-  per-step host-to-device copy under ``--data-residency device``).
-* It attaches no diagnosis, threshold or confidence label. Those measurement
-  contracts are not yet defined; rendering does not infer replacements.
-* It does not reconcile artifacts that disagree. The per-step row count and
-  ``summary.json``'s ``steps`` are shown side by side, and a mismatch is
-  flagged rather than quietly resolved.
+A diverged run may record a non-finite loss. The JSON report preserves it using
+Python's ``NaN``/``Infinity`` extensions, which strict JSON consumers may reject.
+Validation JSON contains no floating-point measurements and uses strict JSON.
 
-A damaged or unsupported run is refused with one actionable line and exit
-code 2, and no partial report is written:
+Output writes replace individual files through temporary siblings. A failed
+write preserves an existing destination, and report output cannot overwrite
+an existing input artifact, including a path alias to that artifact. The three
+run files are written separately: a failure during recording can leave an
+incomplete or mixed artifact set. Validation detects missing required files
+and count mismatches, but cannot detect every mixture with matching counts.
+Repeat failed recordings into a fresh directory.
+
+``runs/``, ``reports/``, datasets, traces, and local planning files are ignored
+by Git. Reports include paths and machine metadata; review them before sharing.
+
+Development checks
+==================
+
+``tools/dev.py`` defines the checks used locally and by CI:
 
 .. code-block:: console
 
-   $ shardscope report --run runs/typo
-   error: no such run directory: runs/typo. A run directory holds steps.csv
-   and environment.json (see examples/train_single.py --out-dir).
-   $ shardscope report --run runs
-   error: runs has no steps.csv, so it is not a run directory. It does contain
-   2 run directories: w1-cpu, w1-mps.
+   $ python tools/dev.py --list
+   $ python tools/dev.py test
+   $ python tools/dev.py lint
+   $ python tools/dev.py format-check
+   $ python tools/dev.py format
+   $ python tools/dev.py cov
+   $ python tools/dev.py ci
 
-A per-step CSV carrying columns this version does not know -- the profiled
-schema, for instance -- is refused rather than loaded with those columns
-dropped, because a silently narrowed file would produce a report describing a
-run that did not happen.
+``format`` rewrites files; ``format-check`` only checks them. ``cov`` runs the
+suite with branch coverage and an 80% minimum. ``ci`` runs lint, formatting,
+README parsing, coverage, workflow bootstrap, ignore-policy checks, and the
+installed CLI smoke test, in that order.
 
-``--out`` may not name an artifact of the run being reported. ``--out
-runs/baseline/steps.csv`` would replace the evidence with a rendering of it,
-so it is refused before the file is opened, and so is a symlink or relative
-alias that resolves to the same file. Elsewhere, an existing report is
-replaced whole: the new document is written to a temporary file beside it
-and swapped in, so a write that fails partway -- a full disk -- leaves the
-previous report intact rather than truncated. That is a single-file
-guarantee against partial writes, not durability against power loss.
+The smoke check verifies the installed CLI version, captures environment
+metadata, runs the CPU fixture with and without a config, validates its
+artifacts, and renders HTML. Integration tests exercise commands as separate
+processes. Skipped tests identify unimplemented contracts or unavailable
+prerequisites.
 
-Validating a run
-================
+Changes to artifact formats should update producers, readers, renderers, and
+regression tests together. Keep CLI errors actionable and preserve the
+separation between missing data, unavailable activity, and measured zero.
+Comments should explain behavior, invariants, or non-obvious constraints.
 
-``shardscope validate`` answers one question about a run directory: can it
-be reported? It loads the directory exactly as ``report`` does, renders
-nothing, writes nothing, and prints what it found.
-
-.. code-block:: console
-
-   $ shardscope validate --run runs/baseline
-   valid run: runs/baseline
-     steps.csv         100 row(s), steps 0..99, synchronized=true, data_residency=host
-     environment.json  present; extra.profiled=false
-     summary.json      present; steps=100, agrees with steps.csv
-     files             environment.json, steps.csv, summary.json
-     fields            3 recorded, 2 not_observed, 6 not recorded (shardscope report explains each)
-     warnings          none
-
-An absent ``summary.json`` is valid and is said to be absent; no statistic
-is computed in its place. A run whose ``environment.json`` does not record
-``extra.profiled``, or whose rows were measured under different
-``synchronized`` or ``data_residency`` settings, validates with a warning
-that says so. Warnings never become defaults.
-
-Two things fail validation, with the project's usual one line on stderr and
-exit code 2: a directory that will not load (the same message ``report``
-would print), and a ``summary.json`` whose ``steps`` disagrees with the row
-count of ``steps.csv``. ``report`` renders that disagreement, because a
-report describes what is on disk; ``validate`` refuses it, because two
-artifacts that describe different runs cannot be vouched for as one
-recording. Neither number is adjusted in either command.
-
-``--format json`` writes the same result as a document for automation --
-``ok``, ``errors``, ``warnings``, the row and step range, the recorded step
-count and whether it agrees, ``profiled``, the file list and the per-field
-availability statuses. It carries no statistic. On a failure the document
-is still written, with ``ok: false`` and the error inside it, and the exit
-code is still 2.
-
-Honest-measurement rules
-========================
-
-These are project invariants, not style preferences:
-
-* Profiled diagnostic runs and unprofiled throughput benchmarks are separate
-  commands. Throughput claims only ever come from unprofiled runs, because
-  profiling overhead distorts step time.
-* GPU kernels, host-to-device copies, and collectives overlap. Their
-  durations do not sum to step time, so ShardScope does not derive
-  "percent wasted" figures from naive sums.
-* When an event class is not visible in the running PyTorch/CUDA/NCCL build,
-  it is reported as ``not_observed`` -- never as a plausible number.
-* Multi-GPU and NCCL results are reported only from hosts that actually ran
-  them. ``shardscope env`` says whether this host qualifies.
-
-Limitations
-===========
-
-What this version cannot do, and why. None of these are oversights: each one
-waits on a measurement decision that has to be made deliberately, and
-guessing would produce a number nobody could defend.
-
-* **No profiler capture.** ``shardscope profile`` is declared but refuses to
-  run. The capture schedule, the activity set, and the ``record_function``
-  marker names every later rule keys off are unsettled, and they determine
-  what a trace *means*.
-* **No profiled per-step fields.** ``data_wait_ms``, ``h2d_copy_ms`` and the
-  rest have no reader and no renderer. A per-step CSV that carries them is
-  refused, not partially loaded.
-* **No bottleneck diagnosis, thresholds or confidence labels.** A report
-  states that a diagnosis is absent and names the decision it waits on.
-* **No throughput benchmark or before/after comparison.** ``bench`` and
-  ``compare`` refuse to run: without an agreed warmup count, repeat count
-  and variance test, a percentage change would be undefendable.
-* **No statistics computed by the report.** It prints what ``summary.json``
-  recorded and derives nothing, not even a mean.
-* **Single-device only.** ``examples/train_ddp.py`` is a skeleton. Nothing
-  here has produced a multi-GPU or NCCL measurement, and ``shardscope env``
-  reports whether the host could.
-* **No multi-run or sweep reporting.** ``report`` takes one run directory.
-* **Reports are local artifacts.** ``runs/`` and ``reports/`` are
-  git-ignored: both embed the producing machine's paths, device names and
-  library versions.
-
-Troubleshooting
-===============
-
-``shardscope: command not found``
-  The package is not installed into the active interpreter, or the virtual
-  environment is not activated. Re-run ``uv pip install -e ".[dev]"`` after
-  ``source .venv/bin/activate``.
-
-``shardscope --version`` disagrees with ``python -c "import shardscope"``
-  Another ``shardscope`` is earlier on ``PATH``, or the editable install is
-  stale. ``python tools/dev.py smoke`` reports this explicitly; fix it by
-  reinstalling and checking ``which -a shardscope``.
-
-``No module named torch`` or a resolution failure during install
-  Check the interpreter is 3.10-3.12 and, on Apple silicon, ``arm64``.
-  PyTorch publishes no wheel outside that range.
-
-``error: 'profile' is not implemented yet ...``
-  Expected. The message names the decision the command waits on. Same for
-  ``bench`` and ``compare``.
-
-``error: <dir> has no steps.csv, so it is not a run directory``
-  ``--run`` wants one run directory, not the parent that holds several. The
-  message lists the run directories it found underneath.
-
-``error: <dir>: summary.json records steps=N but steps.csv has M row(s)``
-  From ``shardscope validate``. The two artifacts were written separately
-  and one of them does not describe this run -- usually a run directory
-  that was reused and partly overwritten. ``shardscope report`` will still
-  render it and flag the disagreement; do not treat it as a recording.
-  Repeat the run into a fresh directory.
-
-``error: <file>: unexpected column(s): data_wait_ms``
-  The CSV uses the profiled schema, which has no reader yet. The message
-  names the open decisions. The column is not dropped, because a silently
-  narrowed file would produce a report describing a run that did not happen.
-
-``error: --out-dir <path> exists and is not a directory``
-  Raised before the first training step, so nothing is lost. Point
-  ``--out-dir`` at a new or existing directory.
-
-``error: the run finished but its artifacts could not be written to <dir>``
-  The run is not recorded and has to be repeated. Usually a full disk or a
-  permission change during the run. Each file lands whole or not at all,
-  but the three are swapped in one after another, so the directory may
-  hold an incomplete set or -- if it already held an earlier recording --
-  a mix of two runs' files. ``shardscope report`` refuses a missing file
-  and flags a step-count disagreement; it cannot detect a mix that agrees
-  on the count, so do not report from the directory.
-
-``error: refusing to write the report over <file>: --out names an artifact of the run``
-  ``--out`` points at ``steps.csv``, ``environment.json``, ``summary.json``
-  or another file inside the run directory being reported (possibly through
-  a symlink). Write the report somewhere else; the run directory is the
-  evidence and is never overwritten by the tool that reads it.
-
-``error: cannot tell the report format from 'x.pdf'``
-  Use an ``.html``, ``.htm``, ``.json`` or ``.csv`` suffix, or pass
-  ``--format`` explicitly. PDF is not a supported format.
-
-Exit code 141 from ``shardscope report ... | head``
-  Not an error: 128 + SIGPIPE, meaning the reader stopped reading. Nothing
-  is printed to stderr. Use ``--out FILE`` if you want the whole report.
-
-A test is skipped rather than run
-  Tests needing hardware this machine lacks are marked ``gpu`` or
-  ``distributed`` and skip rather than fake a result. ``shardscope env``
-  says what the host has. The integration tests skip if the console script
-  is not installed.
-
-Development
-===========
-
-Every check is defined once, in ``tools/dev.py``, and CI invokes the same
-script. "It passed locally" and "it passed in CI" therefore mean the same
-commands ran.
-
-.. code-block:: console
-
-   $ python tools/dev.py --list     # show every check
-   $ python tools/dev.py test       # pytest, no coverage gate
-   $ python tools/dev.py cov        # pytest with the 80% coverage gate
-   $ python tools/dev.py lint       # ruff check
-   $ python tools/dev.py format     # ruff format (rewrites files)
-   $ python tools/dev.py ci         # the full CI sequence, in order
-
-``ci`` runs, in order: ``lint``, ``format-check``, ``readme-check`` (this
-file parses with no docutils warnings), ``cov`` (pytest plus the 80%
-coverage gate), ``bootstrap-check`` (the commit skill regenerates
-byte-identically), ``ignore-policy``, and ``smoke``. The cheap static gates
-come first so a typo fails in seconds. ``python tools/dev.py --list`` is the
-authority; this paragraph is prose about it.
-
-``smoke`` is the end-to-end gate: it checks the console script's version
-against the installed distribution, runs ``shardscope env``, runs the
-training fixture with and without ``--config``, validates a real recorded
-run and renders it to HTML. ``tests/test_integration.py`` covers the same path as spawned
-processes and asserts on the output rather than only the exit codes.
-
-Tests that need hardware this machine lacks are marked ``gpu`` or
-``distributed`` and are skipped rather than faked.
-
-Local commit workflow
-=====================
-
-Automated local commits are opt-in and run through a guarded helper. After
-cloning, regenerate the local commit workflow:
+Local commits can use the guarded helper:
 
 .. code-block:: console
 
    $ python tools/bootstrap_commit_skill.py
-   $ python tools/commit_safe.py --authorize    # then edit the auth file by hand
-   $ python tools/commit_safe.py -m "feat: ..." --dry-run
+   $ python tools/commit_safe.py --authorize
+   $ python tools/commit_safe.py --message "docs: update development workflow" --dry-run
 
-``tools/commit_safe.py`` runs the tests, stages only allowlisted paths,
-re-reads the staged set, and refuses Markdown, planning documents, trace
-exports, and unreviewed GPU-path changes. It never pushes, merges, rebases,
-amends, or force-pushes.
+Configure the generated, ignored authorization file with the repository-local
+Git identity and explicit commit authorization before using the helper. It
+runs tests and checks allowed paths before committing. GPU-path changes require
+completed review. The helper does not push. Bootstrap exit code ``3`` indicates
+an unavailable reference workflow; the local template is still generated.
 
-Two things that look like failures and are not:
+Development direction
+=====================
 
-* ``bootstrap_commit_skill.py`` exits ``3`` when the reference committing
-  convention is absent. The workflow is still generated from the local
-  template, with the missing reference noted. CI accepts this status.
-* ``--authorize`` refuses to touch an existing authorization file, and the
-  template it creates has ``authorized: false``. Enabling automated commits
-  requires explicit local configuration of the author identity and authorization.
+The artifact and reporting workflow is the current development baseline.
+The next work depends on explicit measurement contracts:
+
+1. Define capture scheduling, activity selection, phase markers, and per-rank
+   trace layout, then implement bounded profiler capture.
+2. Define profiled per-step fields and loader-wait semantics, then implement
+   trace parsing and alignment by rank and step.
+3. Define diagnostic thresholds and confidence criteria, then add evidence-linked
+   rules and an injected loader-stall regression fixture.
+4. Define benchmark warmup, repeats, and variance criteria before enabling
+   ``bench`` and ``compare``.
+5. Implement and validate DDP capture on a host with at least two CUDA devices.
+   Synchronization, overlap, and straggler behavior require a defined strategy.
+
+GPU setup and hardware validation remain pending. CPU checks do not establish
+CUDA, NCCL, or distributed correctness. An available device inventory alone is
+not evidence of a completed distributed run.
+
+Profiled diagnostic timings must remain separate from unprofiled throughput
+results. Kernel, copy, and collective durations can overlap and must not be
+summed into a fraction of step time. Trace alignment must not assume precise
+clock synchronization across hosts. Memory sweeps and autotuning are outside
+the current scope.
 
 Repository layout
 =================
 
 .. code-block:: text
 
-   src/shardscope/     cli, env, config, errors, artifacts, availability,
-                       validate, report/html_report; capture/parse/rules
-                       skeletons
-   examples/           train_single.py, train_ddp.py
-   benchmarks/         unprofiled throughput harness and comparisons
-   tests/              unit and integration tests
-   tools/              dev.py (all checks), bootstrap and safe-commit helpers
+   src/shardscope/   CLI, configuration, environment, artifacts, validation,
+                    reporting; capture, trace parsing, and diagnostic stubs
+   examples/        single-device fixture, CPU config, DDP stub
+   benchmarks/      throughput and comparison stubs
+   tests/           unit and subprocess integration tests
+   tools/           development checks, commit tooling, local session launcher
 
-Planning documents, design notes, and all Markdown are intentionally
-git-ignored and stay local. Public documentation lives in this file.
+Public documentation lives in ``README.rst``. Markdown working documents and
+planning notes remain local.
 
-Run outputs (``runs/``) and rendered reports (``reports/``) are git-ignored
-as well: both embed the producing machine's paths, device names and library
-versions, and a report is meant to be reviewed before it is shared.
+Troubleshooting
+===============
+
+``shardscope`` is missing or reports the wrong version
+  Activate ``.venv`` and reinstall with ``uv pip install -e ".[dev]"``.
+  Run ``python tools/dev.py smoke`` to check the console script against the
+  installed package. Use ``which -a shardscope`` to find competing installs.
+
+A run fails validation
+  Pass the individual run directory, not its parent. Check that both required
+  files exist. For a recorded count mismatch or a failed recording, rerun the
+  fixture into a fresh directory.
+
+``profile``, ``bench``, or ``compare`` exits with a dependency message
+  Expected in this version. See `Development direction`_ for the missing
+  contracts and implementations.
+
+Exit code ``141`` when piping a report to ``head``
+  The reader closed stdout early. Use ``--out FILE`` to save the full report.
+  CLI success returns ``0``; invalid input, inconsistent validation results,
+  and unavailable commands return ``2``.
 
 License
-=========
+========
 
 MIT.
