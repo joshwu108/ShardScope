@@ -140,7 +140,9 @@ Supported keys and defaults:
 
 Explicit flags override file values. Keys starting with ``_`` are ignored;
 other unknown keys and invalid values are rejected before training starts.
-The config path and resolved settings are recorded in ``environment.json``.
+``seed`` must fit the 64-bit generator seed the fixture derives its batch
+schedule from (``-2**63`` to ``2**64 - 2``). The config path and resolved
+settings are recorded in ``environment.json``.
 
 ``--device`` accepts ``cpu``, ``mps``, ``cuda``, or ``auto``. Automatic
 selection prefers CUDA, then MPS, then CPU. Use ``--device cpu`` for local
@@ -173,8 +175,11 @@ preserve that absence. The current CSV schema is:
    step,loss,step_time_ms,data_residency,synchronized
 
 Step indices must increase without duplicates. Durations must be finite and
-non-negative. Unsupported columns are rejected rather than dropped.
-Provenance retains unrecognized keys so a round trip does not discard metadata.
+non-negative. Unsupported columns are rejected rather than dropped, and so is
+a ``steps.csv`` that starts with a UTF-8 byte-order mark, which a spreadsheet
+re-save adds. Each artifact must be a regular file; a directory in its place
+is refused rather than read as absent. Provenance retains unrecognized keys so
+a round trip does not discard metadata.
 
 Reports render recorded statistics without recomputing them. Field availability
 uses three states: ``recorded``, ``not_recorded``, and ``not_observed``. Unknown
@@ -233,6 +238,7 @@ Local commits can use the guarded helper:
    $ python tools/bootstrap_commit_skill.py
    $ python tools/commit_safe.py --authorize
    $ python tools/commit_safe.py --message "docs: update development workflow" --dry-run
+   $ python tools/commit_safe.py --message "fix: ..." --path src/shardscope/cli.py --path tests
 
 Configure the generated, ignored authorization file with the repository-local
 Git identity and explicit commit authorization before using the helper. It
@@ -240,26 +246,44 @@ runs tests and checks allowed paths before committing. GPU-path changes require
 completed review. The helper does not push. Bootstrap exit code ``3`` indicates
 an unavailable reference workflow; the local template is still generated.
 
+``--path`` (repeatable) limits a commit to one changed file or directory; the
+allowlist and deny list still apply. Paths are read from Git NUL-delimited, so
+names containing spaces, tabs, newlines, or non-ASCII characters are staged
+whole. The helper never resets the index: if the index already holds staged
+paths the commit does not select, or a partially staged file, it refuses
+before staging anything. ``--dry-run`` stages into a scratch index and leaves
+the real index untouched.
+
 Development direction
 =====================
 
-The artifact and reporting workflow is the current development baseline.
-The next work depends on explicit measurement contracts:
+Implemented: the single-device fixture, the artifact reader and validator,
+HTML/JSON/CSV reporting, environment capture, the development checks, and the
+guarded commit helper. All of it runs on CPU and is covered by the test suite.
 
-1. Define capture scheduling, activity selection, phase markers, and per-rank
-   trace layout, then implement bounded profiler capture.
-2. Define profiled per-step fields and loader-wait semantics, then implement
-   trace parsing and alignment by rank and step.
-3. Define diagnostic thresholds and confidence criteria, then add evidence-linked
-   rules and an injected loader-stall regression fixture.
-4. Define benchmark warmup, repeats, and variance criteria before enabling
-   ``bench`` and ``compare``.
-5. Implement and validate DDP capture on a host with at least two CUDA devices.
-   Synchronization, overlap, and straggler behavior require a defined strategy.
+Proposed, not decided: the measurement contracts the remaining commands need.
+Each is drafted as a proposal with alternatives in local planning notes, and
+none is implemented until it is approved:
 
-GPU setup and hardware validation remain pending. CPU checks do not establish
-CUDA, NCCL, or distributed correctness. An available device inventory alone is
-not evidence of a completed distributed run.
+1. Capture inputs and lifecycle: profiler schedule, activity selection,
+   optional overhead features, export and failure cleanup.
+2. Phase-marker names and boundaries, including what loader wait measures.
+   Host-to-device copies are inside step timing in the current fixture.
+3. Rank and step identity and the per-rank artifact layout, without assuming
+   synchronized clocks across hosts.
+4. Format versioning: how a future artifact set is distinguished from today's
+   while unknown keys and files are still preserved.
+5. Benchmark warmup, repetition, and variance criteria for ``bench`` and
+   ``compare``.
+6. Diagnostic thresholds and the confidence vocabulary for ``rules``.
+
+GPU-dependent: implementing and validating bounded capture on a CUDA host,
+measuring the profiler overhead and warmup counts the contracts leave as
+placeholders, the injected loader-stall fixture, and DDP capture on a host
+with at least two CUDA devices and NCCL. A single-GPU check and a multi-GPU
+check are separate acceptance steps. CPU checks do not establish CUDA, NCCL,
+or distributed correctness, and an available device inventory alone is not
+evidence of a completed distributed run.
 
 Profiled diagnostic timings must remain separate from unprofiled throughput
 results. Kernel, copy, and collective durations can overlap and must not be
@@ -298,6 +322,11 @@ A run fails validation
 ``profile``, ``bench``, or ``compare`` exits with a dependency message
   Expected in this version. See `Development direction`_ for the missing
   contracts and implementations.
+
+``--device cuda`` fails with a PyTorch traceback on a host without CUDA
+  The fixture passes the request to PyTorch without a pre-check; the device
+  selection path is reserved for the GPU development pass. Use ``--device
+  cpu`` or ``auto`` on such a host.
 
 Exit code ``141`` when piping a report to ``head``
   The reader closed stdout early. Use ``--out FILE`` to save the full report.

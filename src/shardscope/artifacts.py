@@ -140,8 +140,15 @@ class RunArtifacts:
 
     @property
     def run_id(self) -> str:
-        """The run directory's name -- the handle a report is filed under."""
-        return self.path.name
+        """The run directory's name -- the handle a report is filed under.
+
+        ``Path(".").name`` is the empty string, so the name is taken from
+        ``os.path.abspath(path)``: ``.`` and ``..`` are collapsed lexically
+        against the working directory at the time of the call, and symlinks
+        are not resolved, so ``link/..`` names the link's lexical parent.
+        ``path`` itself is kept exactly as given.
+        """
+        return Path(os.path.abspath(self.path)).name or str(self.path)
 
     @property
     def extra(self) -> dict[str, Any]:
@@ -284,13 +291,15 @@ def load_run(path: str | Path) -> RunArtifacts:
         raise ArtifactError(f"{run_dir} is not a directory; pass the run directory itself.")
 
     steps_path = run_dir / STEPS_CSV
-    if not steps_path.is_file():
+    _refuse_non_file(steps_path)
+    if not steps_path.exists():
         raise ArtifactError(
             f"{run_dir} has no {STEPS_CSV}, so it is not a run directory.{_discovery_hint(run_dir)}"
         )
 
     environment_path = run_dir / ENVIRONMENT_JSON
-    if not environment_path.is_file():
+    _refuse_non_file(environment_path)
+    if not environment_path.exists():
         raise ArtifactError(
             f"{run_dir} has no {ENVIRONMENT_JSON}. That file is the run's provenance; "
             "without it there is no record of the machine, "
@@ -303,8 +312,11 @@ def load_run(path: str | Path) -> RunArtifacts:
         _load_json_object(environment_path, label="environment"), source=str(environment_path)
     )
 
+    # Optional means absent. Something at the summary's path that is not a
+    # file is not "no summary"; reading on would hide whatever it is.
     summary_path = run_dir / SUMMARY_JSON
-    summary = _load_json_object(summary_path, label="summary") if summary_path.is_file() else None
+    _refuse_non_file(summary_path)
+    summary = _load_json_object(summary_path, label="summary") if summary_path.exists() else None
 
     return RunArtifacts(
         path=run_dir,
@@ -313,6 +325,22 @@ def load_run(path: str | Path) -> RunArtifacts:
         summary=summary,
         artifact_names=tuple(sorted(item.name for item in _entries(run_dir) if item.is_file())),
     )
+
+
+def _refuse_non_file(path: Path) -> None:
+    """Refuse an artifact path that exists but is not a regular file.
+
+    A directory, socket or device named ``steps.csv`` is neither the
+    artifact nor its absence. Saying "has no steps.csv" would send the user
+    looking for a file that is, in a sense, right there.
+    """
+    if path.exists() and not path.is_file():
+        kind = "a directory" if path.is_dir() else "not a regular file"
+        raise ArtifactError(
+            f"{path} is {kind}, not a regular file. A run directory holds {path.name} as "
+            "a file written by the fixture; this directory was not produced by it, or has "
+            "been altered since."
+        )
 
 
 def _entries(target: Path) -> tuple[Path, ...]:
@@ -363,6 +391,16 @@ def load_steps_csv(path: str | Path) -> tuple[StepRow, ...]:
         ) from exc
     except OSError as exc:  # pragma: no cover - permissions/IO specific
         raise ArtifactError(f"cannot read {target}: {exc}") from exc
+
+    if text.startswith("\ufeff"):
+        # Read as plain UTF-8 the mark becomes an invisible prefix on the
+        # first column name, and the header check would then report "step"
+        # as missing from a file that visibly starts with it.
+        raise ArtifactError(
+            f"{target} starts with a UTF-8 byte-order mark. The fixture writes none; a "
+            "spreadsheet or editor re-save adds one. Re-produce the run, or save the file "
+            "again as UTF-8 without a byte-order mark, rather than reporting an edited copy."
+        )
 
     reader = csv.reader(text.splitlines())
     try:

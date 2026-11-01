@@ -30,7 +30,11 @@ Always go through the helper rather than raw git:
 
 The helper stages only allowlisted paths, re-reads
 `git diff --cached --name-only`, runs `git diff --check --cached`, and aborts
-on anything unexpected.
+on anything unexpected. Add `--path FILE_OR_DIR` (repeatable) to commit one
+slice of the allowed changes; the rest stay in the work tree. If the index
+already holds staged paths the commit does not select, or a partially staged
+file, the helper refuses before staging anything: it never resets the index.
+`--dry-run` stages into a scratch index and leaves the real one untouched.
 
 Commit message format (`<type>: <description>`), types: feat, fix, refactor,
 docs, test, chore, perf, ci.

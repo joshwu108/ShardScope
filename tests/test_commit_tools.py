@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -212,3 +213,301 @@ class TestBootstrapWritesOnlyTheSkill:
         assert bootstrap.main(["--check"]) == 1
         assert not (sandbox / bootstrap.TARGET).exists()
         assert "missing" in capsys.readouterr().err
+
+
+#: File names git must carry through the helper as single paths. Each one
+#: breaks whitespace splitting in a different way: a space, a tab, a newline
+#: and a non-ASCII name that ``str.split`` leaves alone but a locale decode
+#: might not.
+AWKWARD_NAMES = (
+    "src/with space.py",
+    "src/with\ttab.py",
+    "src/with\nnewline.py",
+    "src/größe-ünïcode.py",
+)
+
+AUTHOR = ("Test Author", "author@example.invalid")
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+    )
+    if check and result.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {result.stdout}{result.stderr}")
+    return result
+
+
+def _staged(repo: Path) -> list[str]:
+    out = _git(repo, "diff", "--cached", "--name-only", "-z", "--no-renames").stdout
+    return sorted(p for p in out.split("\0") if p)
+
+
+def _committed(repo: Path) -> list[str]:
+    out = _git(repo, "show", "--name-only", "--format=", "-z", "--no-renames", "HEAD").stdout
+    return sorted(p for p in out.split("\0") if p)
+
+
+def _write(repo: Path, relative: str, text: str = "x = 1\n") -> Path:
+    target = repo / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return target
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A disposable repository the helper can commit into.
+
+    Identity, authorization and the test command are all local to this
+    directory; nothing here reads or writes the developer's own
+    configuration. The test command is a no-op interpreter call so these
+    tests exercise the staging rules, not the project's test suite.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "--local", "user.name", AUTHOR[0])
+    _git(root, "config", "--local", "user.email", AUTHOR[1])
+    _git(root, "config", "--local", "commit.gpgsign", "false")
+    _write(root, "src/base.py", "base = 1\n")
+    _write(root, "README.rst", "Readme\n")
+    _write(root, ".gitignore", f"{commit_safe.AUTH_FILE}\n")
+    _git(root, "add", "--", "src/base.py", "README.rst", ".gitignore")
+    _git(root, "commit", "-q", "-m", "initial")
+    (root / commit_safe.AUTH_FILE).write_text(
+        json.dumps(
+            {
+                "authorized": True,
+                "author_name": AUTHOR[0],
+                "author_email": AUTHOR[1],
+                "allow_patterns": list(commit_safe.DEFAULT_ALLOW_PATTERNS),
+                "gpu_review_required": ["src/gpu_only.py"],
+                "test_command": [sys.executable, "-c", "pass"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    return root
+
+
+class TestPathsSurviveWhitespace:
+    """Git prints paths NUL-delimited; the helper must read them that way."""
+
+    def test_changed_paths_lists_awkward_names_whole(self, repo):
+        for name in AWKWARD_NAMES:
+            _write(repo, name)
+        _write(repo, "src/base.py", "base = 2\n")
+
+        assert commit_safe.changed_paths(repo) == sorted([*AWKWARD_NAMES, "src/base.py"])
+
+    def test_a_commit_carries_awkward_names_as_single_paths(self, repo, capsys):
+        for name in AWKWARD_NAMES:
+            _write(repo, name)
+
+        assert commit_safe.main(["--message", "feat: awkward names"]) == 0
+
+        assert _committed(repo) == sorted(AWKWARD_NAMES)
+        assert _git(repo, "status", "--porcelain").stdout == ""
+        out = capsys.readouterr().out
+        assert "committed locally (not pushed)" in out
+        for name in AWKWARD_NAMES:
+            assert commit_safe._show(name) in out
+
+    def test_a_move_stages_both_the_deletion_and_the_new_name(self, repo):
+        (repo / "src" / "base.py").rename(repo / "src" / "renamed.py")
+
+        assert commit_safe.main(["--message", "refactor: rename"]) == 0
+
+        assert _committed(repo) == ["src/base.py", "src/renamed.py"]
+        tracked = _git(repo, "ls-files", "-z").stdout.split("\0")
+        assert "src/base.py" not in tracked
+        assert "src/renamed.py" in tracked
+
+
+class TestDryRunLeavesTheIndexAlone:
+    def test_dry_run_reports_the_staging_without_staging(self, repo, capsys):
+        _write(repo, "src/new.py")
+        _write(repo, AWKWARD_NAMES[0])
+
+        assert commit_safe.main(["--message", "feat: x", "--dry-run"]) == 0
+
+        assert _staged(repo) == []
+        out = capsys.readouterr().out
+        assert "src/new.py" in out
+        assert commit_safe._show(AWKWARD_NAMES[0]) in out
+        assert "the index was not modified" in out
+        assert _git(repo, "rev-list", "--count", "HEAD").stdout.strip() == "1"
+
+    def test_dry_run_keeps_a_pre_staged_entry_byte_for_byte(self, repo):
+        _write(repo, "src/base.py", "base = 2\n")
+        _git(repo, "add", "--", "src/base.py")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+
+        assert commit_safe.main(["--message", "fix: base", "--dry-run"]) == 0
+
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+
+    def test_dry_run_works_before_the_first_commit(self, tmp_path, monkeypatch, capsys):
+        root = tmp_path / "unborn"
+        root.mkdir()
+        _git(root, "init", "-q", "-b", "main")
+        _git(root, "config", "--local", "user.name", AUTHOR[0])
+        _git(root, "config", "--local", "user.email", AUTHOR[1])
+        _write(root, ".gitignore", f"{commit_safe.AUTH_FILE}\n")
+        _write(root, "src/first.py")
+        (root / commit_safe.AUTH_FILE).write_text(
+            json.dumps(
+                {
+                    "authorized": True,
+                    "author_name": AUTHOR[0],
+                    "author_email": AUTHOR[1],
+                    "allow_patterns": list(commit_safe.DEFAULT_ALLOW_PATTERNS),
+                    "test_command": [sys.executable, "-c", "pass"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(root)
+
+        assert commit_safe.main(["--message", "feat: first", "--dry-run"]) == 0
+
+        assert _staged(root) == []
+        assert "src/first.py" in capsys.readouterr().out
+
+    def test_dry_run_still_catches_whitespace_damage(self, repo, capsys):
+        _write(repo, "src/trailing.py", "x = 1   \n")
+
+        assert commit_safe.main(["--message", "feat: x", "--dry-run"]) == 1
+
+        assert "whitespace" in capsys.readouterr().err
+        assert _staged(repo) == []
+
+
+class TestUnrelatedStagedWorkIsPreserved:
+    """The helper never resets the index; it refuses instead."""
+
+    def test_refuses_when_the_index_holds_a_path_outside_the_commit(self, repo, capsys):
+        _write(repo, "notes.txt", "someone else's staged work\n")
+        _git(repo, "add", "--", "notes.txt")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+        _write(repo, "src/new.py")
+
+        assert commit_safe.main(["--message", "feat: x"]) == 1
+
+        err = capsys.readouterr().err
+        assert "does not select" in err
+        assert "notes.txt" in err
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+        assert _git(repo, "rev-list", "--count", "HEAD").stdout.strip() == "1"
+
+    def test_refuses_a_partially_staged_selected_file(self, repo, capsys):
+        _write(repo, "src/base.py", "base = 2\n")
+        _git(repo, "add", "--", "src/base.py")
+        _write(repo, "src/base.py", "base = 3\n")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+
+        assert commit_safe.main(["--message", "fix: base"]) == 1
+
+        assert "partially staged" in capsys.readouterr().err
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+
+    def test_a_fully_staged_selected_file_is_committed(self, repo):
+        _write(repo, "src/base.py", "base = 2\n")
+        _git(repo, "add", "--", "src/base.py")
+
+        assert commit_safe.main(["--message", "fix: base"]) == 0
+
+        assert _committed(repo) == ["src/base.py"]
+
+    def test_a_wildcard_name_cannot_touch_a_staged_sibling(self, repo, capsys):
+        # ``--`` paths are glob pathspecs unless told otherwise: without
+        # GIT_LITERAL_PATHSPECS, ``src/a[1].py`` also matched ``src/a1.py``,
+        # so the undo after a failed check unstaged the sibling's work.
+        _write(repo, "src/a1.py", "staged = 1\n")
+        _git(repo, "add", "--", "src/a1.py")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+        _write(repo, "src/a[1].py", "x = 1   \n")
+        _write(repo, "src/a?.py", "y = 1\n")
+
+        assert commit_safe.main(["--message", "fix: x"]) == 1
+
+        assert "whitespace" in capsys.readouterr().err
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+
+    def test_a_wildcard_name_is_committed_as_itself(self, repo):
+        _write(repo, "src/a1.py")
+        _write(repo, "src/a[1].py")
+
+        assert commit_safe.main(["--message", "feat: x", "--path", "src/a[1].py"]) == 0
+
+        assert _committed(repo) == ["src/a[1].py"]
+        assert _staged(repo) == []
+
+    def test_a_failed_check_unstages_only_what_this_run_staged(self, repo, capsys):
+        _write(repo, "src/base.py", "base = 2\n")
+        _git(repo, "add", "--", "src/base.py")
+        _write(repo, "src/trailing.py", "x = 1   \n")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+
+        assert commit_safe.main(["--message", "fix: x"]) == 1
+
+        assert "whitespace" in capsys.readouterr().err
+        assert _staged(repo) == ["src/base.py"]
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+
+
+class TestExplicitPathSelection:
+    def test_path_limits_the_commit_to_one_slice(self, repo, capsys):
+        _write(repo, "src/one.py")
+        _write(repo, "src/two.py")
+        _write(repo, "tests/test_one.py")
+
+        assert commit_safe.main(["--message", "feat: one", "--path", "src/one.py"]) == 0
+
+        assert _committed(repo) == ["src/one.py"]
+        assert _staged(repo) == []
+        out = capsys.readouterr().out
+        assert "not selected by --path" in out
+        assert "src/two.py" in out
+        assert "tests/test_one.py" in out
+
+    def test_a_directory_selector_covers_its_changed_files(self, repo):
+        _write(repo, "src/one.py")
+        _write(repo, "tests/test_one.py")
+        _write(repo, "tests/test_two.py")
+
+        assert commit_safe.main(["--message", "test: both", "--path", "tests/"]) == 0
+
+        assert _committed(repo) == ["tests/test_one.py", "tests/test_two.py"]
+
+    def test_a_selector_matching_nothing_is_refused(self, repo, capsys):
+        _write(repo, "src/one.py")
+
+        assert commit_safe.main(["--message", "feat: x", "--path", "src/typo.py"]) == 1
+
+        err = capsys.readouterr().err
+        assert "matches no changed path" in err
+        assert _git(repo, "rev-list", "--count", "HEAD").stdout.strip() == "1"
+
+    def test_a_selector_cannot_widen_the_allowlist(self, repo, capsys):
+        _write(repo, "planning/plan.md", "secret plan\n")
+        _write(repo, "src/one.py")
+
+        assert commit_safe.main(["--message", "feat: x", "--path", "planning/plan.md"]) == 1
+
+        assert "cannot widen" in capsys.readouterr().err
+        assert _staged(repo) == []
+
+    def test_gpu_paths_still_need_review_when_selected(self, repo, capsys):
+        _write(repo, "src/gpu_only.py")
+
+        assert commit_safe.main(["--message", "feat: gpu", "--path", "src/gpu_only.py"]) == 1
+
+        assert "GPU review" in capsys.readouterr().err
+        assert _staged(repo) == []

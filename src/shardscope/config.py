@@ -23,6 +23,8 @@ from shardscope.errors import ConfigError
 __all__ = [
     "DATA_RESIDENCY_CHOICES",
     "DEVICE_CHOICES",
+    "SEED_MAX",
+    "SEED_MIN",
     "RunConfig",
     "load_run_config",
 ]
@@ -33,6 +35,14 @@ DEVICE_CHOICES = ("auto", "cpu", "mps", "cuda")
 
 #: Supported batch-placement strategies.
 DATA_RESIDENCY_CHOICES = ("host", "device")
+
+#: The seeds the fixture's generators accept. ``torch.Generator.manual_seed``
+#: takes a 64-bit value in ``[-2**63, 2**64 - 1]``, and the fixture derives
+#: ``seed + 1`` for its batch schedule, so the top of the range is one lower.
+#: A seed outside it used to surface as a ``ValueError`` traceback from inside
+#: torch after the config had been accepted.
+SEED_MIN = -(2**63)
+SEED_MAX = 2**64 - 2
 
 #: Keys beginning with this prefix are ignored, so a config can carry notes.
 #: Same convention as .shardscope-commit-auth.json's ``_comment``.
@@ -165,6 +175,7 @@ def _validate(config: RunConfig, *, source: str) -> RunConfig:
         _require_positive_int(config, name, source)
 
     _require_int(config, "seed", source)
+    _require_seed_in_range(config, source)
     _require_positive_finite_number(config, "learning_rate", source)
     _require_choice(config, "device", DEVICE_CHOICES, source)
     _require_choice(config, "data_residency", DATA_RESIDENCY_CHOICES, source)
@@ -194,6 +205,15 @@ def _require_positive_int(config: RunConfig, name: str, source: str) -> None:
     value = _value(config, name)
     if value <= 0:
         raise ConfigError(f"{source}: config key {name!r} must be positive, got {value}.")
+
+
+def _require_seed_in_range(config: RunConfig, source: str) -> None:
+    value = _value(config, "seed")
+    if not SEED_MIN <= value <= SEED_MAX:
+        raise ConfigError(
+            f"{source}: config key 'seed' must be between {SEED_MIN} and {SEED_MAX} "
+            f"(a 64-bit generator seed), got {value}."
+        )
 
 
 def _require_positive_finite_number(config: RunConfig, name: str, source: str) -> None:

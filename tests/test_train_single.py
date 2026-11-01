@@ -385,6 +385,14 @@ class TestMain:
         assert summary["steps"] == 4
         assert len(rows) == 5
 
+    def test_a_seed_outside_the_generator_range_is_one_error_line(self, capsys):
+        assert train_single.main(["--steps", "1", "--device", "cpu", "--seed", str(2**64)]) == 2
+
+        captured = capsys.readouterr()
+        assert "'seed' must be between" in captured.err
+        assert "Traceback" not in captured.err
+        assert "step" not in captured.out
+
     def test_an_invalid_device_choice_is_rejected_by_the_parser(self):
         with pytest.raises(SystemExit):
             train_single.main(["--device", "tpu"])

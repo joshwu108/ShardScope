@@ -104,6 +104,22 @@ class TestLoadStepsCsv:
         with pytest.raises(ArtifactError, match="no step rows"):
             load_steps_csv(path)
 
+    def test_a_byte_order_mark_is_named_not_reported_as_a_missing_column(self, tmp_path):
+        # A spreadsheet re-save prepends U+FEFF to the header. Read as UTF-8
+        # that becomes an invisible prefix on the first column name, and the
+        # loader used to report "missing required column(s): step" for a
+        # file whose first column visibly is "step".
+        path = tmp_path / STEPS_CSV
+        path.write_text(GOOD_STEPS_CSV, encoding="utf-8-sig")
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_steps_csv(path)
+
+        message = str(excinfo.value)
+        assert "byte-order mark" in message
+        assert str(path) in message
+        assert "missing required column" not in message
+
     def test_a_missing_column_is_named(self, tmp_path):
         path = tmp_path / STEPS_CSV
         path.write_text("step,loss,step_time_ms,data_residency\n0,1.0,2.0,host\n")
@@ -203,6 +219,21 @@ class TestLoadRun:
         assert len(run.steps) == 3
         assert run.summary["median_step_ms"] == 9.41929197870195
 
+    @pytest.mark.parametrize("spelling", [".", "./", "../baseline"])
+    def test_a_relative_run_path_is_filed_under_the_directory_name(
+        self, make_run, monkeypatch, spelling
+    ):
+        # ``Path(".").name`` is the empty string, so ``--run .`` used to file
+        # the report under no name at all. The path itself is kept as given;
+        # only the handle is taken from the absolute form.
+        run_dir = make_run("baseline")
+        monkeypatch.chdir(run_dir)
+
+        run = load_run(spelling)
+
+        assert run.run_id == "baseline"
+        assert str(run.path) == str(Path(spelling))
+
     def test_provenance_is_preserved_verbatim_including_unknown_keys(self, make_run):
         environment = {
             **GOOD_ENVIRONMENT,
@@ -238,6 +269,32 @@ class TestLoadRun:
 
         assert ENVIRONMENT_JSON in str(excinfo.value)
         assert "provenance" in str(excinfo.value)
+
+    @pytest.mark.parametrize("artifact", [STEPS_CSV, ENVIRONMENT_JSON])
+    def test_a_directory_in_place_of_a_required_artifact_is_named_as_such(self, make_run, artifact):
+        # "has no steps.csv" is the wrong diagnosis when something called
+        # steps.csv is there; the reader must say what it found instead.
+        run_dir = make_run()
+        (run_dir / artifact).unlink()
+        (run_dir / artifact).mkdir()
+
+        with pytest.raises(ArtifactError) as excinfo:
+            load_run(run_dir)
+
+        message = str(excinfo.value)
+        assert "not a regular file" in message
+        assert str(run_dir / artifact) in message
+        assert "has no" not in message
+
+    def test_a_directory_in_place_of_the_summary_is_refused_not_treated_as_absent(self, make_run):
+        # summary.json is optional, but "optional" means absent, not
+        # "present as something that cannot be a summary".
+        run_dir = make_run()
+        (run_dir / SUMMARY_JSON).unlink()
+        (run_dir / SUMMARY_JSON).mkdir()
+
+        with pytest.raises(ArtifactError, match="not a regular file"):
+            load_run(run_dir)
 
     def test_a_missing_directory_is_refused(self, tmp_path):
         with pytest.raises(ArtifactError, match="no such run directory"):
