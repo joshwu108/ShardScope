@@ -31,7 +31,11 @@ Usage::
     python tools/commit_safe.py --authorize   # write the auth file template
 
 ``--dry-run`` stages into a scratch index file and leaves the real index
-untouched, so its report is what the commit would stage, not an estimate.
+untouched (it does add loose objects to the object store), so its report is
+what the commit would stage, not an estimate.
+
+Every git call runs with ``GIT_LITERAL_PATHSPECS=1``: a path is a path, so a
+file named ``a[1].py`` cannot stage, check or unstage ``a1.py`` beside it.
 
 Authorization lives in ``.shardscope-commit-auth.json`` (git-ignored) and
 must be enabled explicitly before automated commits are allowed.
@@ -117,6 +121,11 @@ def run(
     that is not valid UTF-8 into a crash, while ``surrogateescape`` carries
     the bytes through and ``subprocess`` encodes them back the same way when
     the path is handed to the next git command.
+
+    ``GIT_LITERAL_PATHSPECS`` is set for every call. Without it ``--
+    <path>`` is a glob, and ``[``, ``*`` or ``?`` in a file name would make
+    ``git add`` stage unselected siblings and the undo path unstage work
+    that was staged before this run.
     """
     result = subprocess.run(
         list(args),
@@ -124,7 +133,7 @@ def run(
         encoding="utf-8",
         errors="surrogateescape",
         cwd=cwd,
-        env=env,
+        env={**os.environ, "GIT_LITERAL_PATHSPECS": "1", **(env or {})},
     )
     if check and result.returncode != 0:
         raise CommitRefused(
@@ -134,7 +143,7 @@ def run(
 
 
 def repo_root() -> Path:
-    return Path(run(["git", "rev-parse", "--show-toplevel"]).stdout.strip())
+    return Path(run(["git", "rev-parse", "--show-toplevel"]).stdout.rstrip("\n"))
 
 
 def load_auth(root: Path) -> dict:
@@ -347,17 +356,25 @@ def check_staged(
     return staged
 
 
+def has_head(root: Path) -> bool:
+    """False on an unborn branch, where there is no commit to diff against."""
+    return (
+        run(["git", "rev-parse", "--verify", "-q", "HEAD"], check=False, cwd=root).returncode == 0
+    )
+
+
 def stage_in_scratch_index(root: Path, selected: list[str]) -> list[str]:
     """Stage ``selected`` into a temporary index and check it; the real index is untouched.
 
-    ``GIT_INDEX_FILE`` points git at a scratch file seeded from HEAD, so a
-    dry run exercises the exact ``git add`` and ``git diff --check`` the
-    commit would, including untracked files, without staging anything the
-    caller then has to undo.
+    ``GIT_INDEX_FILE`` points git at a scratch file seeded from HEAD (or
+    empty on an unborn branch), so a dry run exercises the exact ``git add``
+    and ``git diff --check`` the commit would, including untracked files,
+    without staging anything the caller then has to undo.
     """
     with tempfile.TemporaryDirectory(prefix="commit-safe-index-") as scratch:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
-        run(["git", "read-tree", "HEAD"], cwd=root, env=env)
+        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        if has_head(root):
+            run(["git", "read-tree", "HEAD"], cwd=root, env=env)
         run(["git", "add", "--", *selected], cwd=root, env=env)
         return check_staged(root, selected, env=env)
 
@@ -377,7 +394,14 @@ def stage_for_commit(root: Path, selected: list[str]) -> list[str]:
     except CommitRefused as exc:
         newly = [p for p in selected if p not in before]
         if newly:
-            undo = run(["git", "restore", "--staged", "--", *newly], check=False, cwd=root)
+            # On an unborn branch there is no HEAD to restore from; the
+            # entries are new, so removing them from the index is the undo.
+            undo_argv = (
+                ["git", "restore", "--staged", "--", *newly]
+                if has_head(root)
+                else ["git", "rm", "--cached", "-q", "-r", "--", *newly]
+            )
+            undo = run(undo_argv, check=False, cwd=root)
             if undo.returncode != 0:
                 raise CommitRefused(
                     f"{exc}\n\nunstaging the paths this run staged also failed; the index "
@@ -480,6 +504,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             staged = stage_in_scratch_index(root, selected)
         else:
+            # The tests can take minutes; anything staged meanwhile would
+            # otherwise slip past the check made before they ran.
+            conflicts = index_conflicts(root, selected)
+            if conflicts:
+                raise CommitRefused("\n".join(conflicts))
             staged = stage_for_commit(root, selected)
 
         print("staged:\n  " + _listing(staged))

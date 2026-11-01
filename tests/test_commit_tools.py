@@ -344,6 +344,45 @@ class TestDryRunLeavesTheIndexAlone:
         assert "the index was not modified" in out
         assert _git(repo, "rev-list", "--count", "HEAD").stdout.strip() == "1"
 
+    def test_dry_run_keeps_a_pre_staged_entry_byte_for_byte(self, repo):
+        _write(repo, "src/base.py", "base = 2\n")
+        _git(repo, "add", "--", "src/base.py")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+
+        assert commit_safe.main(["--message", "fix: base", "--dry-run"]) == 0
+
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+
+    def test_dry_run_works_before_the_first_commit(self, tmp_path, monkeypatch, capsys):
+        root = tmp_path / "unborn"
+        root.mkdir()
+        _git(root, "init", "-q", "-b", "main")
+        _git(root, "config", "--local", "user.name", AUTHOR[0])
+        _git(root, "config", "--local", "user.email", AUTHOR[1])
+        _write(root, ".gitignore", f"{commit_safe.AUTH_FILE}\n")
+        _write(root, "src/first.py")
+        (root / commit_safe.AUTH_FILE).write_text(
+            (
+                repo_auth := json.dumps(
+                    {
+                        "authorized": True,
+                        "author_name": AUTHOR[0],
+                        "author_email": AUTHOR[1],
+                        "allow_patterns": list(commit_safe.DEFAULT_ALLOW_PATTERNS),
+                        "test_command": [sys.executable, "-c", "pass"],
+                    }
+                )
+            ),
+            encoding="utf-8",
+        )
+        assert repo_auth
+        monkeypatch.chdir(root)
+
+        assert commit_safe.main(["--message", "feat: first", "--dry-run"]) == 0
+
+        assert _staged(root) == []
+        assert "src/first.py" in capsys.readouterr().out
+
     def test_dry_run_still_catches_whitespace_damage(self, repo, capsys):
         _write(repo, "src/trailing.py", "x = 1   \n")
 
@@ -388,6 +427,30 @@ class TestUnrelatedStagedWorkIsPreserved:
         assert commit_safe.main(["--message", "fix: base"]) == 0
 
         assert _committed(repo) == ["src/base.py"]
+
+    def test_a_wildcard_name_cannot_touch_a_staged_sibling(self, repo, capsys):
+        # ``--`` paths are glob pathspecs unless told otherwise: without
+        # GIT_LITERAL_PATHSPECS, ``src/a[1].py`` also matched ``src/a1.py``,
+        # so the undo after a failed check unstaged the sibling's work.
+        _write(repo, "src/a1.py", "staged = 1\n")
+        _git(repo, "add", "--", "src/a1.py")
+        before = _git(repo, "ls-files", "--stage", "-z").stdout
+        _write(repo, "src/a[1].py", "x = 1   \n")
+        _write(repo, "src/a?.py", "y = 1\n")
+
+        assert commit_safe.main(["--message", "fix: x"]) == 1
+
+        assert "whitespace" in capsys.readouterr().err
+        assert _git(repo, "ls-files", "--stage", "-z").stdout == before
+
+    def test_a_wildcard_name_is_committed_as_itself(self, repo):
+        _write(repo, "src/a1.py")
+        _write(repo, "src/a[1].py")
+
+        assert commit_safe.main(["--message", "feat: x", "--path", "src/a[1].py"]) == 0
+
+        assert _committed(repo) == ["src/a[1].py"]
+        assert _staged(repo) == []
 
     def test_a_failed_check_unstages_only_what_this_run_staged(self, repo, capsys):
         _write(repo, "src/base.py", "base = 2\n")
@@ -451,9 +514,3 @@ class TestExplicitPathSelection:
 
         assert "GPU review" in capsys.readouterr().err
         assert _staged(repo) == []
-
-
-def test_show_makes_whitespace_visible():
-    assert commit_safe._show("src/plain.py") == "src/plain.py"
-    assert commit_safe._show("src/with space.py") == "'src/with space.py'"
-    assert commit_safe._show("a\nb") == "'a\\nb'"

@@ -142,10 +142,11 @@ class RunArtifacts:
     def run_id(self) -> str:
         """The run directory's name -- the handle a report is filed under.
 
-        Taken from the absolute form of ``path`` so ``.`` and ``..`` name
-        the directory they stand for instead of yielding an empty handle.
-        Symlinks are not resolved: a run reported through a link is filed
-        under the name the caller used. ``path`` itself is kept as given.
+        ``Path(".").name`` is the empty string, so the name is taken from
+        ``os.path.abspath(path)``: ``.`` and ``..`` are collapsed lexically
+        against the working directory at the time of the call, and symlinks
+        are not resolved, so ``link/..`` names the link's lexical parent.
+        ``path`` itself is kept exactly as given.
         """
         return Path(os.path.abspath(self.path)).name or str(self.path)
 
