@@ -10,6 +10,8 @@ import pytest
 from shardscope.config import (
     DATA_RESIDENCY_CHOICES,
     DEVICE_CHOICES,
+    SEED_MAX,
+    SEED_MIN,
     RunConfig,
     field_names,
     from_mapping,
@@ -221,6 +223,26 @@ class TestActionableErrors:
     def test_a_non_integer_seed_is_rejected(self, tmp_path):
         with pytest.raises(ConfigError, match="'seed' must be an integer"):
             load_run_config(_write(tmp_path, {"seed": 1.5}))
+
+    @pytest.mark.parametrize("seed", [SEED_MIN - 1, SEED_MAX + 1, 10**30, -(10**30)])
+    def test_a_seed_the_generators_cannot_take_is_rejected_before_training(self, tmp_path, seed):
+        # torch's generators take a 64-bit seed and the fixture derives
+        # seed + 1 for its batch schedule; past that the fixture raised a
+        # ValueError traceback from inside torch after the config had
+        # already been accepted.
+        with pytest.raises(ConfigError, match="'seed' must be between"):
+            load_run_config(_write(tmp_path, {"seed": seed}))
+
+    @pytest.mark.parametrize("seed", [SEED_MIN, SEED_MAX, 0, -1])
+    def test_the_seed_range_limits_are_accepted(self, tmp_path, seed):
+        assert load_run_config(_write(tmp_path, {"seed": seed})).seed == seed
+
+    def test_the_seed_limits_are_what_torch_and_the_fixture_accept(self):
+        # Both ends run through the real generators: the fixture builds the
+        # dataset from ``seed`` and its batch schedule from ``seed + 1``.
+        for seed in (SEED_MIN, SEED_MAX):
+            train_single.make_synthetic_dataset(4, seed)
+            train_single._batch_index_schedule(4, 2, 1, seed)
 
     def test_a_non_numeric_learning_rate_is_rejected(self, tmp_path):
         with pytest.raises(ConfigError, match="must be a number"):
