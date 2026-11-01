@@ -362,20 +362,17 @@ class TestDryRunLeavesTheIndexAlone:
         _write(root, ".gitignore", f"{commit_safe.AUTH_FILE}\n")
         _write(root, "src/first.py")
         (root / commit_safe.AUTH_FILE).write_text(
-            (
-                repo_auth := json.dumps(
-                    {
-                        "authorized": True,
-                        "author_name": AUTHOR[0],
-                        "author_email": AUTHOR[1],
-                        "allow_patterns": list(commit_safe.DEFAULT_ALLOW_PATTERNS),
-                        "test_command": [sys.executable, "-c", "pass"],
-                    }
-                )
+            json.dumps(
+                {
+                    "authorized": True,
+                    "author_name": AUTHOR[0],
+                    "author_email": AUTHOR[1],
+                    "allow_patterns": list(commit_safe.DEFAULT_ALLOW_PATTERNS),
+                    "test_command": [sys.executable, "-c", "pass"],
+                }
             ),
             encoding="utf-8",
         )
-        assert repo_auth
         monkeypatch.chdir(root)
 
         assert commit_safe.main(["--message", "feat: first", "--dry-run"]) == 0
