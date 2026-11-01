@@ -219,6 +219,21 @@ class TestLoadRun:
         assert len(run.steps) == 3
         assert run.summary["median_step_ms"] == 9.41929197870195
 
+    @pytest.mark.parametrize("spelling", [".", "./", "../baseline"])
+    def test_a_relative_run_path_is_filed_under_the_directory_name(
+        self, make_run, monkeypatch, spelling
+    ):
+        # ``Path(".").name`` is the empty string, so ``--run .`` used to file
+        # the report under no name at all. The path itself is kept as given;
+        # only the handle is taken from the absolute form.
+        run_dir = make_run("baseline")
+        monkeypatch.chdir(run_dir)
+
+        run = load_run(spelling)
+
+        assert run.run_id == "baseline"
+        assert str(run.path) == str(Path(spelling))
+
     def test_provenance_is_preserved_verbatim_including_unknown_keys(self, make_run):
         environment = {
             **GOOD_ENVIRONMENT,

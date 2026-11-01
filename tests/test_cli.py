@@ -110,6 +110,13 @@ class TestReportCommand:
         assert "baseline" in out.read_text()
         assert str(out) in capsys.readouterr().out
 
+    def test_a_report_of_the_current_directory_names_it(self, make_run, monkeypatch, capsys):
+        monkeypatch.chdir(make_run("baseline"))
+
+        assert main(["report", "--run", ".", "--format", "json"]) == 0
+
+        assert json.loads(capsys.readouterr().out)["run_id"] == "baseline"
+
     def test_the_format_follows_the_output_suffix(self, make_run, tmp_path):
         run_dir = make_run()
         as_json = tmp_path / "r.json"

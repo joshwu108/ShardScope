@@ -140,8 +140,14 @@ class RunArtifacts:
 
     @property
     def run_id(self) -> str:
-        """The run directory's name -- the handle a report is filed under."""
-        return self.path.name
+        """The run directory's name -- the handle a report is filed under.
+
+        Taken from the absolute form of ``path`` so ``.`` and ``..`` name
+        the directory they stand for instead of yielding an empty handle.
+        Symlinks are not resolved: a run reported through a link is filed
+        under the name the caller used. ``path`` itself is kept as given.
+        """
+        return Path(os.path.abspath(self.path)).name or str(self.path)
 
     @property
     def extra(self) -> dict[str, Any]:
