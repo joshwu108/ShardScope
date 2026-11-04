@@ -188,3 +188,71 @@ def test_invalid_mapping_is_not_inferred(tmp_path, rank, mappings):
     trace = parse_trace(synthetic_trace(tmp_path, [event(), event("unknown")]))
     with pytest.raises(ArtifactError):
         analyze_traces((trace,), rank=rank, step_map=mappings)
+
+
+def test_duplicate_boundaries_and_invalid_mapping_types_are_refused(tmp_path):
+    trace = parse_trace(synthetic_trace(tmp_path, [event()]))
+    for mappings in [
+        (StepMapping(trace.path.name, 0, 1), StepMapping(trace.path.name, 0, 2)),
+        (None,),
+        (StepMapping([], 0, 1),),
+        (StepMapping(trace.path.name, True, 1),),
+    ]:
+        with pytest.raises(ArtifactError, match="boundary|StepMapping|filename"):
+            analyze_traces((trace,), rank=0, step_map=mappings)
+
+
+def test_unsupported_host_form_prevents_a_partial_metric(tmp_path):
+    events = [
+        event(),
+        event("shardscope/data_wait", 0, 100),
+        dict(ph="B", name="shardscope/data_wait", ts=500, pid=1, tid=2),
+        dict(ph="E", ts=900, pid=1, tid=2),
+    ]
+    trace = parse_trace(synthetic_trace(tmp_path, events))
+    rows, warnings = analyze_traces(
+        (trace,), rank=0, step_map=(StepMapping(trace.path.name, 0, 4),)
+    )
+    metric = rows[0]["measurements"]["host_data_wait_ms"]
+    assert metric["value_ms"] is None
+    assert "unsupported host marker form" in metric["reason"]
+    assert metric["evidence"] == []
+    assert any("unsupported host marker" in warning for warning in warnings)
+
+
+def test_host_ranges_on_other_threads_or_crossing_boundaries_are_unmapped(tmp_path):
+    a = event("shardscope/data_wait", 0, 100)
+    a["tid"] = 3
+    b = event("shardscope/data_wait", 9000, 2000)
+    trace = parse_trace(synthetic_trace(tmp_path, [event(), a, b]))
+    rows, warnings = analyze_traces(
+        (trace,), rank=1, step_map=(StepMapping(trace.path.name, 0, 4),)
+    )
+    assert rows[0]["measurements"]["host_data_wait_ms"]["value_ms"] is None
+    assert sum("unmapped" in warning for warning in warnings) == 2
+
+
+def test_corrupt_compressed_body_and_range_endpoint(tmp_path):
+    path = tmp_path / "synthetic.json.gz"
+    path.write_bytes(b"\x1f\x8b\x08\x00" + b"\x00" * 6 + b"\xff" * 20)
+    with pytest.raises(ArtifactError, match="cannot read trace"):
+        parse_trace(path)
+    with pytest.raises(ArtifactError, match="endpoint"):
+        parse_trace(synthetic_trace(tmp_path, [event(ts=1e308, dur=1e308)]))
+    for key in ["ts", "dur"]:
+        broken = event()
+        del broken[key]
+        with pytest.raises(ArtifactError, match=f"missing {key}"):
+            parse_trace(synthetic_trace(tmp_path, [broken]))
+
+
+def test_malformed_nested_ranges_are_not_supported_ranges(tmp_path):
+    begin = dict(ph="B", name="outer", pid=1, tid=2, ts=0)
+    nested = dict(ph="B", name="inner", pid=1, tid=2, ts=1)
+    end = dict(ph="E", pid=1, tid=2, ts=10)
+    for events, error in [
+        ([begin, nested, end, {**end, "ts": 5}], "reversed"),
+        ([begin, {**end, "name": "different"}], "mismatched"),
+    ]:
+        with pytest.raises(ArtifactError, match=error):
+            parse_trace(synthetic_trace(tmp_path, events))

@@ -52,6 +52,7 @@ def evaluate_rules(steps: list[dict], config: RuleConfig | None) -> list[dict]:
             measured
             and measured.get("status") == "recorded"
             and finite_number(measured.get("value_ms"))
+            and measured["value_ms"] >= 0
             and measured.get("evidence")
             and measured.get("basis") == "host_range"
         )

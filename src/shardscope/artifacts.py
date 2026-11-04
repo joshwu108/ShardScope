@@ -1,8 +1,8 @@
 """Discover, validate and serialize recorded training artifacts.
 
 A run contains ``steps.csv`` and ``environment.json``, with an optional
-``summary.json``. The reader accepts the single-device fixture schema;
-unsupported profiled columns are rejected rather than silently discarded.
+``summary.json`` and validated optional ``analysis.json``. The CSV keeps its
+strict fixture schema; phase measurements belong in the analysis sidecar.
 
 Missing summaries and profiling flags remain unknown. Provenance mappings retain
 unrecognized keys so serialization does not discard reproducibility metadata.
@@ -57,11 +57,9 @@ _FALSE_VALUES = frozenset({"false", "0"})
 
 #: Explain unsupported metric columns without silently discarding data.
 _UNKNOWN_COLUMN_HINT = (
-    "This loader understands only the schema examples/train_single.py writes. The profiled "
-    "per-step metric schema (data_wait_ms, h2d_copy_ms, ...) is not yet defined: "
-    "measured versus derived fields and loader-wait semantics need a contract. "
-    "There is no "
-    "reader for it yet, and dropping the column would misreport the run"
+    "steps.csv retains the five-column fixture schema. The phase metric schema "
+    "belongs in analysis.json, with explicit host/device units, availability, "
+    "source hashes and event evidence. Dropping an unknown CSV column would misreport the run"
 )
 
 

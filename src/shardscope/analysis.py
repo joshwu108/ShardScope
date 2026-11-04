@@ -205,6 +205,8 @@ def validate_analysis(
         payload.get("rank_basis") in ("environment.extra.rank", "explicit_argument"),
         "missing or unsupported rank_basis",
     )
+    if environment is not None and payload["rank_basis"] == "environment.extra.rank":
+        _require(recorded is not None, "rank_basis claims missing environment rank")
     source = payload.get("source")
     _require(
         isinstance(source, dict) and {"steps.csv", "environment.json"} <= source.keys(),
@@ -232,6 +234,28 @@ def validate_analysis(
     _require(
         mapping is None or (isinstance(mapping, str) and mapping in source), "invalid mapping_file"
     )
+    mapped = None
+    if directory is not None and mapping is not None:
+        entries = load_step_map(directory / mapping)
+        mapped = {}
+        targets = set()
+        for entry in entries:
+            _require(
+                type(entry.training_step) is int and entry.training_step >= 0,
+                "invalid mapped training step",
+            )
+            _require(
+                type(entry.event_index) is int and entry.event_index >= 0,
+                "invalid mapped event index",
+            )
+            _require(entry.training_step not in mapped, "duplicate mapped training step")
+            target = (entry.trace_file, entry.event_index)
+            _require(target not in targets, "same boundary mapped to multiple training steps")
+            targets.add(target)
+            mapped[entry.training_step] = {
+                "file": entry.trace_file,
+                "event_index": entry.event_index,
+            }
     traces = {}
 
     def reference(ref):
@@ -259,7 +283,6 @@ def validate_analysis(
     items = payload.get("steps")
     _require(isinstance(items, list), "steps must be array")
     seen = set()
-    by_step = {}
     for row in items:
         _require(isinstance(row, dict), "step must be object")
         step = row.get("training_step")
@@ -269,8 +292,12 @@ def validate_analysis(
         )
         _require(steps is None or step in steps, f"training_step {step} absent from steps.csv")
         seen.add(step)
-        by_step[step] = row
+        _require("boundary" in row, "step missing boundary field")
         boundary_ref = row.get("boundary")
+        _require(
+            boundary_ref is None or mapping is not None,
+            "mapped boundary requires explicit mapping_file provenance",
+        )
         boundary = reference(boundary_ref) if boundary_ref is not None else None
         if boundary is not None:
             _require(
@@ -281,11 +308,16 @@ def validate_analysis(
                 ),
                 "boundary is not complete step marker",
             )
+        if mapped is not None:
+            _require(
+                boundary_ref == mapped.get(step),
+                f"training_step {step}: boundary disagrees with explicit step map",
+            )
         metrics = row.get("measurements")
         _require(isinstance(metrics, dict), "measurements must be object")
         _require(
-            set(HOST_PHASES.values()) | set(DEVICE_METRICS) <= metrics.keys(),
-            "missing measurement fields",
+            set(HOST_PHASES.values()) | set(DEVICE_METRICS) == metrics.keys(),
+            "missing or unsupported measurement fields",
         )
         for name, metric in metrics.items():
             _require(isinstance(metric, dict), f"{name}: measurement must be object")
@@ -344,6 +376,12 @@ def validate_analysis(
                     f"{name}: unavailable measurement needs nulls, reason and no evidence",
                 )
     _require(steps is None or seen == steps, "analysis must retain all steps.csv identities")
+    _require(
+        [row["training_step"] for row in items] == sorted(seen),
+        "analysis steps must be ordered by training_step",
+    )
+    if mapped is not None:
+        _require(mapped.keys() <= seen, "step map contains training steps absent from analysis")
     config = payload.get("rule_config")
     if config is not None:
         _require(
@@ -408,7 +446,7 @@ def write_analysis(path: str | Path, payload: dict, *, overwrite: bool = False) 
             os.replace(temporary, target)
         else:
             os.link(temporary, target)
-    except OSError as exc:
+    except (OSError, ValueError, TypeError) as exc:
         raise ArtifactError(f"cannot publish {target}: {exc}") from exc
     finally:
         if temporary is not None:
@@ -416,8 +454,8 @@ def write_analysis(path: str | Path, payload: dict, *, overwrite: bool = False) 
     return target
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Share the module interface with a future console subcommand."""
     parser.add_argument("--run", required=True, type=Path)
     parser.add_argument("--rank", type=int)
     parser.add_argument(
@@ -428,7 +466,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--loader-wait-threshold-ms", type=float)
     parser.add_argument("--overwrite", action="store_true")
-    args = parser.parse_args(argv)
+
+
+def run_arguments(args: argparse.Namespace) -> int:
+    """Execute explicitly requested analysis from validated command arguments."""
     try:
         if (args.run / ANALYSIS_JSON).exists() and not args.overwrite:
             raise ArtifactError(f"{args.run / ANALYSIS_JSON} exists; pass --overwrite")
@@ -449,6 +490,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    add_arguments(parser)
+    return run_arguments(parser.parse_args(argv))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import math
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,9 +63,11 @@ def parse_trace(path: str | Path) -> Trace:
     """
     target = Path(path)
     try:
+        if not target.is_file():
+            raise ArtifactError(f"cannot read trace {target}: expected a regular file")
         raw = target.read_bytes()
         decoded = gzip.decompress(raw) if target.suffix.lower() == ".gz" else raw
-    except (OSError, EOFError) as exc:
+    except (OSError, EOFError, zlib.error) as exc:
         raise ArtifactError(f"cannot read trace {target}: {exc}") from exc
     payload = read_json_bytes(decoded, source=str(target))
     metadata = {}
@@ -78,7 +81,8 @@ def parse_trace(path: str | Path) -> Trace:
     if not isinstance(payload, list):
         raise ArtifactError(f"{target}: expected event array or object with traceEvents array")
     warnings = []
-    stacks: dict[tuple[Any, Any], list[dict]] = {}
+    stacks: dict[tuple[Any, Any], list[tuple[int, dict]]] = {}
+    last_range_time = {}
     for index, event in enumerate(payload):
         where = f"{target} event[{index}]"
         if not isinstance(event, dict) or not isinstance(event.get("ph"), str) or not event["ph"]:
@@ -110,15 +114,24 @@ def parse_trace(path: str | Path) -> Trace:
                 if not finite_number(event["ts"] + event["dur"]):
                     raise ArtifactError(f"{where}: range endpoint is not finite")
             else:
-                stack = stacks.setdefault((event["pid"], event["tid"]), [])
+                thread = (event["pid"], event["tid"])
+                stack = stacks.setdefault(thread, [])
+                if thread in last_range_time and event["ts"] < last_range_time[thread]:
+                    raise ArtifactError(f"{where}: reversed B/E range timestamp order")
+                last_range_time[thread] = event["ts"]
                 if phase == "B":
-                    stack.append(event)
-                elif not stack or event["ts"] < stack.pop()["ts"]:
-                    raise ArtifactError(f"{where}: unmatched or reversed B/E range")
+                    stack.append((index, event))
+                elif not stack:
+                    raise ArtifactError(f"{where}: unmatched B/E range")
+                else:
+                    _, begin = stack.pop()
+                    if "name" in event and event["name"] != begin["name"]:
+                        raise ArtifactError(f"{where}: mismatched B/E range name")
         if phase != "X":
             warnings.append(f"event[{index}]: {phase!r} form retained; unsupported for host timing")
-    if any(stacks.values()):
-        raise ArtifactError(f"{target}: unclosed B/E range")
+    for stack in stacks.values():
+        if stack:
+            raise ArtifactError(f"{target} event[{stack[-1][0]}]: unclosed B/E range")
     if not payload:
         warnings.append("empty trace: no events recorded")
     return Trace(target, tuple(payload), metadata, hashlib.sha256(raw).hexdigest(), tuple(warnings))
@@ -201,7 +214,16 @@ def analyze_traces(
     warnings = [f"{trace.path.name}: {warning}" for trace in traces for warning in trace.warnings]
     boundaries = []
     seen_steps = set()
+    seen_boundaries = set()
     for mapping in step_map:
+        if not isinstance(mapping, StepMapping):
+            raise ArtifactError("step_map must contain StepMapping objects")
+        target = (mapping.trace_file, mapping.event_index)
+        if not isinstance(mapping.trace_file, str) or type(mapping.event_index) is not int:
+            raise ArtifactError("step mapping requires filename and integer event index")
+        if target in seen_boundaries:
+            raise ArtifactError("same boundary mapped to multiple training steps")
+        seen_boundaries.add(target)
         if type(mapping.training_step) is not int or mapping.training_step < 0:
             raise ArtifactError("training_step must be a nonnegative integer")
         if mapping.training_step in seen_steps:
@@ -231,6 +253,7 @@ def analyze_traces(
             ranges = []
             refs = []
             ambiguous = False
+            unsupported = False
             for index, event in enumerate(trace.events):
                 if event.get("name") != marker:
                     continue
@@ -238,6 +261,9 @@ def analyze_traces(
                     warnings.append(
                         f"{trace.path.name} event[{index}]: unsupported host marker form"
                     )
+                    # Unsupported marker forms can hide additional duration.
+                    # Do not publish a partial union as the complete phase.
+                    unsupported = True
                     continue
                 owners = [
                     m
@@ -260,7 +286,13 @@ def analyze_traces(
                 warnings.append(
                     f"step {mapping.training_step}: multiple {marker} ranges; using interval union"
                 )
-            if ambiguous:
+            if unsupported:
+                metrics[metric] = measurement(
+                    None,
+                    reason="unsupported host marker form prevents complete phase timing",
+                    scope=scope,
+                )
+            elif ambiguous:
                 metrics[metric] = measurement(
                     None, reason="ambiguous overlapping mapped host boundaries", scope=scope
                 )

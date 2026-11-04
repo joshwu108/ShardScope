@@ -212,3 +212,17 @@ def test_reporting_imports_no_torch_and_installed_commands_use_sidecar(make_run)
         result = subprocess.run(command, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert "analysis" in json.loads(result.stdout)
+
+
+def test_unconfigured_analysis_and_invalid_presence_are_explicit(make_run):
+    directory = make_run()
+    payload = analyze_run(directory, rank=0)
+    write_analysis(directory, payload)
+    run = load_run(directory)
+    status = next(s for s in field_statuses(run) if s.field == "suspected_bottleneck")
+    assert status.state == "not_recorded"
+    assert "unconfigured" in status.detail
+    (directory / "analysis.json").write_text("{")
+    result = validate_run(directory)
+    assert not result.ok
+    assert result.to_dict()["analysis"] == {"present": True, "validated": False}

@@ -139,6 +139,7 @@ def validate_run(path: str | Path) -> ValidationResult:
     """
     try:
         run = load_run(path)
+        availability = field_statuses(run)
     except ArtifactError as exc:
         return ValidationResult(
             path=str(path),
@@ -154,6 +155,7 @@ def validate_run(path: str | Path) -> ValidationResult:
             summary_steps=None,
             artifact_names=(),
             availability=(),
+            analysis_present=(Path(path) / "analysis.json").exists(),
         )
 
     errors: list[str] = []
@@ -212,7 +214,7 @@ def validate_run(path: str | Path) -> ValidationResult:
         summary_present=run.summary is not None,
         summary_steps=recorded,
         artifact_names=run.artifact_names,
-        availability=field_statuses(run),
+        availability=availability,
         analysis_present=run.analysis is not None,
     )
 

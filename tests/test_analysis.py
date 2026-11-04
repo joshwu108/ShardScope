@@ -258,3 +258,97 @@ def test_serialized_validation_retains_unknown_fields(make_run):
     payload["future_metadata"] = {"x": ["preserved"]}
     clone = copy.deepcopy(payload)
     assert validate_analysis(clone) == payload
+
+
+def test_sidecar_cannot_reassign_a_valid_boundary_to_another_valid_step(make_run):
+    directory = make_run()
+    synthetic_inputs(directory)
+    payload = build(directory)
+    payload["steps"][1]["training_step"] = 2
+    payload["steps"][2]["training_step"] = 1
+    with pytest.raises(ArtifactError, match="disagrees with explicit step map"):
+        validate_analysis(payload, directory=directory, steps={0, 1, 2})
+
+
+def test_unknown_measurements_and_unvalidated_device_claims_are_refused(make_run):
+    directory = make_run()
+    synthetic_inputs(directory)
+    payload = build(directory)
+    payload["steps"][0]["measurements"]["future_metric"] = {}
+    with pytest.raises(ArtifactError, match="unsupported measurement"):
+        validate_analysis(payload)
+    del payload["steps"][0]["measurements"]["future_metric"]
+    value = payload["steps"][1]["measurements"]["device_busy_ms"]
+    value.update(
+        status="recorded",
+        value_ms=9,
+        basis="device_interval_union",
+        evidence=[{"file": "trace-synthetic.json", "event_index": 1}],
+    )
+    with pytest.raises(ArtifactError, match="device attribution unsupported"):
+        validate_analysis(payload, directory=directory)
+
+
+def test_map_provenance_rank_basis_and_source_errors(make_run):
+    directory = make_run()
+    synthetic_inputs(directory)
+    payload = build(directory)
+    without_map = copy.deepcopy(payload)
+    without_map["mapping_file"] = None
+    with pytest.raises(ArtifactError, match="mapping_file provenance"):
+        validate_analysis(without_map)
+    fake_rank = copy.deepcopy(payload)
+    fake_rank["rank_basis"] = "environment.extra.rank"
+    env = json.loads((directory / "environment.json").read_text())
+    with pytest.raises(ArtifactError, match="missing environment rank"):
+        validate_analysis(fake_rank, environment=env)
+    with pytest.raises(ArtifactError, match="regular source file"):
+        analyze_run(directory, rank=0, trace_files=("missing.json",))
+    with pytest.raises(ArtifactError, match="cannot list run"):
+        analyze_run(directory / "absent", rank=0)
+
+
+def test_no_overwrite_publication_race_preserves_winner(make_run, monkeypatch):
+    directory = make_run()
+    synthetic_inputs(directory)
+    payload = build(directory)
+    target = directory / "analysis.json"
+    import shardscope.analysis as module
+
+    def race(*args):
+        target.write_text("other writer")
+        raise FileExistsError("synthetic publication race")
+
+    monkeypatch.setattr(module.os, "link", race)
+    with pytest.raises(ArtifactError, match="publication race"):
+        write_analysis(directory, payload)
+    assert target.read_text() == "other writer"
+    assert not list(directory.glob(".analysis-*.tmp"))
+
+
+def test_non_json_extension_cannot_leave_partial_sidecar(make_run):
+    directory = make_run()
+    synthetic_inputs(directory)
+    payload = build(directory)
+    payload["unknown"] = float("nan")
+    with pytest.raises(ArtifactError, match="cannot publish"):
+        write_analysis(directory, payload)
+    assert not (directory / "analysis.json").exists()
+    assert not list(directory.glob(".analysis-*.tmp"))
+
+
+def test_reusable_subcommand_arguments(make_run):
+    import argparse
+
+    from shardscope.analysis import add_arguments, run_arguments
+
+    directory = make_run()
+    synthetic_inputs(directory)
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    add_arguments(commands.add_parser("analyze"))
+    args = parser.parse_args(
+        ["analyze", "--run", str(directory), "--rank", "0", "--step-map", "synthetic-map.json"]
+    )
+    assert run_arguments(args) == 0
+    assert (directory / "analysis.json").exists()
