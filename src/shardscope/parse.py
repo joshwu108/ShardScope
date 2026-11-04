@@ -122,3 +122,186 @@ def parse_trace(path: str | Path) -> Trace:
     if not payload:
         warnings.append("empty trace: no events recorded")
     return Trace(target, tuple(payload), metadata, hashlib.sha256(raw).hexdigest(), tuple(warnings))
+
+
+HOST_PHASES = {
+    "shardscope/step": "host_step_ms",
+    "shardscope/data_wait": "host_data_wait_ms",
+    "shardscope/h2d": "host_h2d_ms",
+    "shardscope/forward": "host_forward_ms",
+    "shardscope/backward": "host_backward_ms",
+    "shardscope/optimizer": "host_optimizer_ms",
+}
+DEVICE_METRICS = ("device_h2d_ms", "device_compute_ms", "device_collective_ms", "device_busy_ms")
+
+
+@dataclass(frozen=True)
+class StepMapping:
+    """Producer-supplied identity of an actual complete step-marker event.
+
+    This consumer interface is independent of the producer's pending JSON map.
+    Indices are positions in the original trace array, never filtered indices.
+    """
+
+    trace_file: str
+    event_index: int
+    training_step: int
+
+
+def interval_union_us(intervals) -> float:
+    """Length of an interval union in one caller-specified clock and scope.
+
+    Never pass intervals from different traces, hosts or unaligned clocks.
+    The caller is responsible for device/stream scope and valid attribution.
+    """
+    checked = []
+    for start, end in intervals:
+        if not finite_number(start) or not finite_number(end) or end < start:
+            raise ArtifactError("interval union requires finite ordered microsecond endpoints")
+        checked.append((start, end))
+    total = 0.0
+    right = None
+    for start, end in sorted(checked):
+        total += end - start if right is None else max(0, end - max(start, right))
+        right = end if right is None else max(right, end)
+    if not finite_number(total):
+        raise ArtifactError("interval union overflow")
+    return total
+
+
+def measurement(value, *, basis=None, reason="", evidence=(), status=None, scope="") -> dict:
+    return {
+        "value_ms": value,
+        "status": status or ("recorded" if value is not None else "not_recorded"),
+        "basis": basis,
+        "reason": reason,
+        "evidence": list(evidence),
+        "scope": scope,
+    }
+
+
+def analyze_traces(
+    traces: tuple[Trace, ...],
+    *,
+    rank: int,
+    step_map: tuple[StepMapping, ...],
+    unavailable: dict[str, str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Measure host markers using explicit rank and training-step identities.
+
+    Host phase ownership requires a unique containing mapped boundary on the
+    same thread. Nested phase ranges use a union, not a duration sum. Device
+    events stay raw: host containment does not prove asynchronous ownership.
+    """
+    if type(rank) is not int or rank < 0:
+        raise ArtifactError("rank must be an explicit nonnegative integer")
+    by_name = {trace.path.name: trace for trace in traces}
+    if len(by_name) != len(traces):
+        raise ArtifactError("trace filenames must be unique within one rank")
+    warnings = [f"{trace.path.name}: {warning}" for trace in traces for warning in trace.warnings]
+    boundaries = []
+    seen_steps = set()
+    for mapping in step_map:
+        if type(mapping.training_step) is not int or mapping.training_step < 0:
+            raise ArtifactError("training_step must be a nonnegative integer")
+        if mapping.training_step in seen_steps:
+            raise ArtifactError(f"duplicate mapped training step {mapping.training_step}")
+        seen_steps.add(mapping.training_step)
+        trace = by_name.get(mapping.trace_file)
+        if trace is None:
+            raise ArtifactError(f"step map names unknown trace {mapping.trace_file!r}")
+        trace.reference(mapping.event_index)
+        event = trace.events[mapping.event_index]
+        name = event.get("name", "")
+        if event["ph"] != "X" or not (
+            name == "shardscope/step" or name.startswith("ProfilerStep#")
+        ):
+            raise ArtifactError(
+                f"{mapping.trace_file} event[{mapping.event_index}]: map needs complete step marker"
+            )
+        boundaries.append((mapping, trace, event))
+    rows = []
+    assigned = set()
+    for mapping, trace, boundary in boundaries:
+        metrics = {}
+        scope = (
+            f"rank={rank}; trace={trace.path.name}; pid={boundary['pid']}; tid={boundary['tid']}"
+        )
+        for marker, metric in HOST_PHASES.items():
+            ranges = []
+            refs = []
+            ambiguous = False
+            for index, event in enumerate(trace.events):
+                if event.get("name") != marker:
+                    continue
+                if event["ph"] != "X":
+                    warnings.append(
+                        f"{trace.path.name} event[{index}]: unsupported host marker form"
+                    )
+                    continue
+                owners = [
+                    m
+                    for m, t, b in boundaries
+                    if t is trace
+                    and event["pid"] == b["pid"]
+                    and event["tid"] == b["tid"]
+                    and b["ts"] <= event["ts"]
+                    and event["ts"] + event["dur"] <= b["ts"] + b["dur"]
+                ]
+                if mapping not in owners:
+                    continue
+                if len(owners) != 1:
+                    ambiguous = True
+                    continue
+                assigned.add((trace.path.name, index))
+                ranges.append((event["ts"], event["ts"] + event["dur"]))
+                refs.append(trace.reference(index))
+            if len(refs) > 1:
+                warnings.append(
+                    f"step {mapping.training_step}: multiple {marker} ranges; using interval union"
+                )
+            if ambiguous:
+                metrics[metric] = measurement(
+                    None, reason="ambiguous overlapping mapped host boundaries", scope=scope
+                )
+            elif refs:
+                metrics[metric] = measurement(
+                    interval_union_us(ranges) / 1000,
+                    basis="host_range",
+                    evidence=refs,
+                    scope=scope,
+                    reason="union of complete host ranges; not device execution time",
+                )
+            else:
+                metrics[metric] = measurement(
+                    None, reason=f"missing complete {marker} marker", scope=scope
+                )
+        for metric in DEVICE_METRICS:
+            reason = (unavailable or {}).get(metric)
+            metrics[metric] = measurement(
+                None,
+                status="not_observed" if reason else "not_recorded",
+                reason=reason
+                or "no validated device-to-step correlation or activity classification",
+                scope=f"rank={rank}; training_step={mapping.training_step}",
+            )
+        rows.append(
+            {
+                "training_step": mapping.training_step,
+                "boundary": trace.reference(mapping.event_index),
+                "measurements": metrics,
+            }
+        )
+    for trace in traces:
+        for index, event in enumerate(trace.events):
+            if event.get("name") in HOST_PHASES and (trace.path.name, index) not in assigned:
+                warnings.append(
+                    f"{trace.path.name} event[{index}]: host marker unmapped or ambiguous"
+                )
+    if not step_map:
+        warnings.append("no explicit step mapping; training-step measurements unavailable")
+    warnings.append(
+        "device metrics unavailable without validated attribution; "
+        "raw events preserved in source traces"
+    )
+    return sorted(rows, key=lambda row: row["training_step"]), warnings
