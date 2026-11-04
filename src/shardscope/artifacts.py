@@ -40,14 +40,9 @@ __all__ = [
     "steps_csv_text",
     "write_steps_csv",
 ]
-
-#: Artifact filenames, as written by examples/train_single.py.
 STEPS_CSV = "steps.csv"
 ENVIRONMENT_JSON = "environment.json"
 SUMMARY_JSON = "summary.json"
-
-#: The per-step CSV contract. ``tests/test_artifacts.py`` pins this equal to
-#: ``train_single.STEP_CSV_COLUMNS`` so the two cannot drift apart.
 STEP_COLUMNS = (
     "step",
     "loss",

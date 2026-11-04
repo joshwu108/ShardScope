@@ -1,33 +1,4 @@
 """Check that a run directory is a recording that can be reported.
-
-``shardscope validate --run DIR`` is the artifact reader exposed on its own:
-it loads the directory exactly as ``report`` does and says whether that
-worked, what the run contains, and what it does not. It renders nothing,
-writes nothing and never touches the directory it reads.
-
-It accepts what ``report`` accepts, with one deliberate difference. A step
-count that disagrees between ``summary.json`` and ``steps.csv`` is *shown*
-by a report, because a report describes what is on disk; here it is a
-failure, because the question being answered is "can this directory be
-trusted as a recording of one run", and two artifacts that describe
-different runs mean it cannot. Neither number is adjusted either way.
-
-Two kinds of finding, kept apart on purpose:
-
-``errors``
-    the directory cannot be vouched for -- it did not load, or its
-    artifacts disagree. Exit 2. There is at most one, because loading stops
-    at the first defect.
-``warnings``
-    the directory loaded and can be reported, but something a reader would
-    want to know is missing or mixed: no readable recorded step count, an
-    unrecorded profiling status, rows measured under different policies.
-    Exit 0. A warning is never promoted to a default value.
-
-The result also carries the per-field availability statuses from
-:mod:`shardscope.availability`, so automation can see which report fields
-this run records without rendering a report. It carries no statistic: a
-validation result that quoted a median would be a report by another name.
 """
 
 from __future__ import annotations

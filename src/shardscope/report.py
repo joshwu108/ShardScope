@@ -37,10 +37,7 @@ __all__ = [
     "write_report",
 ]
 
-#: Output formats, in the order ``--help`` lists them.
 REPORT_FORMATS = ("html", "json", "csv")
-
-#: Output suffix -> format. ``.htm`` is accepted because people type it.
 _SUFFIX_FORMATS = {".html": "html", ".htm": "html", ".json": "json", ".csv": "csv"}
 
 
@@ -152,13 +149,7 @@ def write_report(
 
 
 def _refuse_source_collision(run: RunArtifacts, target: Path) -> None:
-    """Refuse an output path that is one of the run's recorded artifact files.
-
-    Candidates are the files the run listed when it was loaded plus the
-    three the layout always names, so a run rebuilt from a JSON report with
-    no file list is still protected. Only an existing file can collide; a
-    new file inside the run directory is the caller's choice and becomes
-    part of the directory listing on the next load.
+    """Refuse an output path that is one of the run's recorded artifact files.ad.
     """
     if not target.exists():
         return

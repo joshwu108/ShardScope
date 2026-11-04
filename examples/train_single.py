@@ -347,21 +347,7 @@ def _resolve_config(args):
 
 
 def out_dir_problem(out_dir: Path) -> str | None:
-    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.
-
-    Called before the first step. The artifacts are written after the last
-    one, so without this check a mistyped path throws away every measured
-    step and reports it as a traceback out of ``mkdir``.
-
-    Nothing is created here. A directory made up front would be left behind
-    empty if the run then failed, and an empty run directory reads as a run
-    that measured nothing.
-
-    The writability probe is a convenience, not a guarantee: ``os.access``
-    is bypassed for root and does not reflect NTFS ACLs on Windows, and a
-    permission can change between this check and the write. The real write
-    in :func:`main` still handles ``OSError``, so this only moves the common
-    failure earlier -- it does not replace that handler.
+    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r.
     """
     if out_dir.exists() and not out_dir.is_dir():
         return (
@@ -381,22 +367,6 @@ def out_dir_problem(out_dir: Path) -> str | None:
 
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
     """Write the artifact triple, each file landing whole or not at all.
-
-    All three documents are rendered before the first byte goes out, and
-    each then replaces its destination through a sibling temporary file
-    (:func:`shardscope.artifacts.replace_file_contents`). The failures that
-    actually happen -- a full disk, a permission that changed during the run
-    -- therefore strike while a temporary file is being written and leave an
-    earlier recording in ``out_dir`` untouched instead of half-overwritten.
-
-    What this is not: a transaction. The three swaps happen one after
-    another, so a failure between them can leave the directory holding
-    fewer than three files, or files from two recordings. ``shardscope
-    report`` refuses a missing file and flags a step-count disagreement, but
-    cannot tell two complete recordings apart beyond that. Closing the gap
-    means a new rule for reusing a run directory (refuse it, or write into a
-    fresh subdirectory), which changes the documented ``--out-dir`` contract
-    and is not decided here.
     """
     from shardscope.artifacts import replace_file_contents
     from shardscope.env import capture_environment
@@ -471,12 +441,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             _write_run_artifacts(args.out_dir, args, config, records, stats, device)
         except OSError as exc:
-            # The run itself succeeded; say plainly that its artifacts did
-            # not survive, so the numbers above are not mistaken for a
-            # recorded run. Not "nothing was written": each file lands whole
-            # or not at all, but the three are swapped in one after another,
-            # so a failure between swaps leaves some of them -- possibly
-            # beside an earlier recording's files.
             print(
                 f"error: the run finished but its artifacts could not be written to "
                 f"{args.out_dir}: {exc.strerror or exc}. This run is not recorded. The "
