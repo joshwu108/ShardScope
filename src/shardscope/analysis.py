@@ -114,7 +114,7 @@ def analyze_run(
     if len(set(trace_files)) != len(trace_files):
         raise ArtifactError("duplicate trace filenames")
     sources = {name: _digest(directory / name) for name in sorted(set(names))}
-    run = load_run(directory)
+    run = load_run(directory, include_analysis=False)
     recorded_rank = run.extra.get("rank")
     if rank is None:
         rank = recorded_rank
@@ -378,7 +378,7 @@ def write_analysis(path: str | Path, payload: dict, *, overwrite: bool = False) 
         raise ArtifactError(f"refusing analysis output symlink {target}")
     if target.exists() and not overwrite:
         raise ArtifactError(f"{target} exists; pass --overwrite to replace explicit analysis")
-    run = load_run(directory)
+    run = load_run(directory, include_analysis=False)
     validate_analysis(
         payload,
         directory=directory,

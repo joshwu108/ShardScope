@@ -32,6 +32,7 @@ __all__ = [
     "SUMMARY_JSON",
     "RunArtifacts",
     "StepRow",
+    "checked_analysis",
     "discover_runs",
     "load_run",
     "load_steps_csv",
@@ -132,6 +133,7 @@ class RunArtifacts:
     environment: dict[str, Any]
     summary: dict[str, Any] | None
     artifact_names: tuple[str, ...]
+    analysis: dict[str, Any] | None = None
 
     @property
     def run_id(self) -> str:
@@ -197,6 +199,7 @@ class RunArtifacts:
             "summary": self.summary,
             "steps": [row.to_dict() for row in self.steps],
             "artifact_names": list(self.artifact_names),
+            **({"analysis": self.analysis} if self.analysis is not None else {}),
         }
 
     @classmethod
@@ -230,13 +233,16 @@ class RunArtifacts:
         summary = payload.get("summary")
         if summary is not None:
             summary = _require_json_object(summary, source=source, label="summary")
-        return cls(
+        run = cls(
             path=Path(path),
             steps=_collect_rows(_serialized_rows(payload["steps"], source=source), source=source),
             environment=environment,
             summary=summary,
             artifact_names=_validated_artifact_names(payload.get("artifact_names", ()), source),
+            analysis=payload.get("analysis"),
         )
+        checked_analysis(run, verify_sources=False)
+        return run
 
 
 def looks_like_run(path: str | Path) -> bool:
@@ -268,7 +274,7 @@ def discover_runs(root: str | Path) -> tuple[Path, ...]:
     return tuple(sorted(child for child in _entries(target) if looks_like_run(child)))
 
 
-def load_run(path: str | Path) -> RunArtifacts:
+def load_run(path: str | Path, *, include_analysis: bool = True) -> RunArtifacts:
     """Load and validate one run directory.
 
     Raises :class:`ArtifactError` -- naming the file and, where it applies,
@@ -313,12 +319,46 @@ def load_run(path: str | Path) -> RunArtifacts:
     _refuse_non_file(summary_path)
     summary = _load_json_object(summary_path, label="summary") if summary_path.exists() else None
 
-    return RunArtifacts(
+    analysis = None
+    analysis_path = run_dir / "analysis.json"
+    if include_analysis:
+        _refuse_non_file(analysis_path)
+        if analysis_path.exists():
+            from shardscope.parse import read_json_bytes
+
+            try:
+                analysis = read_json_bytes(analysis_path.read_bytes(), source=str(analysis_path))
+            except OSError as exc:
+                raise ArtifactError(f"cannot read {analysis_path}: {exc}") from exc
+            if analysis is None:
+                raise ArtifactError(f"{analysis_path}: expected analysis object, got null")
+    run = RunArtifacts(
         path=run_dir,
         steps=load_steps_csv(steps_path),
         environment=environment,
         summary=summary,
         artifact_names=tuple(sorted(item.name for item in _entries(run_dir) if item.is_file())),
+        analysis=analysis,
+    )
+    checked_analysis(run)
+    return run
+
+
+def checked_analysis(run: RunArtifacts, *, verify_sources: bool = True) -> dict | None:
+    """Refuse stale or corrupt derived evidence before displaying it.
+
+    Deserialization can validate shape offline. Reports verify source bytes and
+    evidence targets even if a run was loaded before those bytes changed.
+    """
+    if run.analysis is None:
+        return None
+    from shardscope.analysis import validate_analysis
+
+    return validate_analysis(
+        run.analysis,
+        directory=run.path if verify_sources else None,
+        environment=run.environment,
+        steps={row.step for row in run.steps},
     )
 
 

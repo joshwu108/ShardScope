@@ -1,5 +1,4 @@
-"""Check that a run directory is a recording that can be reported.
-"""
+"""Check that a run directory is a recording that can be reported."""
 
 from __future__ import annotations
 
@@ -43,6 +42,7 @@ class ValidationResult:
     summary_steps: int | None
     artifact_names: tuple[str, ...]
     availability: tuple[FieldStatus, ...]
+    analysis_present: bool = False
 
     @property
     def summary_agrees_with_rows(self) -> bool | None:
@@ -77,6 +77,10 @@ class ValidationResult:
             "profiled": self.profiled,
             "artifact_names": list(self.artifact_names),
             "availability": [status.to_dict() for status in self.availability],
+            "analysis": {
+                "present": self.analysis_present,
+                "validated": self.analysis_present and self.ok,
+            },
         }
 
     def to_json(self) -> str:
@@ -171,6 +175,9 @@ def validate_run(path: str | Path) -> ValidationResult:
             "repeat the run."
         )
 
+    if run.analysis is not None:
+        warnings.extend(run.analysis["warnings"])
+
     if run.profiled is None:
         warnings.append(
             f"{ENVIRONMENT_JSON} does not record extra.profiled, so whether a profiler was "
@@ -206,6 +213,7 @@ def validate_run(path: str | Path) -> ValidationResult:
         summary_steps=recorded,
         artifact_names=run.artifact_names,
         availability=field_statuses(run),
+        analysis_present=run.analysis is not None,
     )
 
 
