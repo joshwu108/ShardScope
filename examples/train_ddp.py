@@ -1,18 +1,11 @@
-"""Distributed training fixture for torchrun.
+"""Conventional torchrun/DDP fixture with separate rank artifacts.
 
-Not implemented. Requires at least two CUDA devices and a defined gradient
-synchronization and overlap strategy. DDP/NCCL measurements must come from
-an actual distributed run on compatible hardware.
+Example: torchrun --standalone --nproc-per-node=2 examples/train_ddp.py
+--config CONFIG --out DIR [--profile]. CUDA/NCCL execution requires hardware
+acceptance independently from the software configuration tests.
 """
 
-from __future__ import annotations
-
-
-def main() -> int:
-    raise NotImplementedError(
-        "DDP requires >=2 CUDA devices and a defined synchronization strategy."
-    )
-
+from shardscope.distributed import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -4,9 +4,7 @@ A JSON config records the knobs needed to reproduce a fixture run. Explicit CLI
 flags override file values; omitted flags preserve them. Invalid keys, types,
 and ranges fail before training starts.
 
-Only settings implemented by ``examples/train_single.py`` are accepted.
-Profiler schedules, activities and phase markers are excluded until the capture
-contract is defined.
+Capture settings require explicit bounded schedules; optional overhead is opt-in.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ __all__ = [
     "DEVICE_CHOICES",
     "SEED_MAX",
     "SEED_MIN",
+    "CaptureConfig",
     "RunConfig",
     "load_run_config",
 ]
@@ -34,6 +33,60 @@ DATA_RESIDENCY_CHOICES = ("host", "device")
 SEED_MIN = -(2**63)
 SEED_MAX = 2**64 - 2
 _COMMENT_PREFIX = "_"
+
+
+@dataclass(frozen=True)
+class CaptureConfig:
+    """An explicit finite profiler schedule, with opt-in overhead features."""
+
+    wait: int
+    warmup: int
+    active: int
+    repeat: int
+    activities: tuple[str, ...]
+    record_shapes: bool = False
+    profile_memory: bool = False
+    with_stack: bool = False
+    with_flops: bool = False
+
+    def __post_init__(self):
+        for name in ("wait", "warmup", "active", "repeat"):
+            value = getattr(self, name)
+            minimum = 1 if name in ("active", "repeat") else 0
+            if type(value) is not int or value < minimum:
+                raise ConfigError(f"capture.{name} must be an integer >= {minimum}")
+        if not isinstance(self.activities, (list, tuple)) or not self.activities:
+            raise ConfigError("capture.activities must be a nonempty list of cpu/cuda labels")
+        if any(x not in ("cpu", "cuda") for x in self.activities):
+            raise ConfigError("capture.activities supports only cpu and cuda")
+        if len(set(self.activities)) != len(self.activities):
+            raise ConfigError("capture.activities must not contain duplicates")
+        # Host markers are required for an explicit trace-to-training step map.
+        if "cpu" not in self.activities:
+            raise ConfigError("capture.activities must include cpu for step markers")
+        object.__setattr__(self, "activities", tuple(self.activities))
+        for name in ("record_shapes", "profile_memory", "with_stack", "with_flops"):
+            if type(getattr(self, name)) is not bool:
+                raise ConfigError(f"capture.{name} must be true or false")
+
+    @property
+    def required_steps(self) -> int:
+        return (self.wait + self.warmup + self.active) * self.repeat
+
+    def validate_steps(self, steps: int) -> None:
+        if self.required_steps > steps:
+            raise ConfigError(
+                f"capture schedule requires {self.required_steps} training steps; available {steps}"
+            )
+
+    @classmethod
+    def from_mapping(cls, value):
+        if not isinstance(value, dict):
+            raise ConfigError("capture must be an object")
+        try:
+            return cls(**value)
+        except TypeError as exc:
+            raise ConfigError(f"invalid capture settings: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -55,6 +108,7 @@ class RunConfig:
     device: str = "auto"
     data_residency: str = "host"
     synchronize: bool = True
+    capture: CaptureConfig | None = None
 
     def merged(self, **changes: Any) -> RunConfig:
         """Return a new config with the non-``None`` ``changes`` applied.
@@ -167,6 +221,12 @@ def _validate(config: RunConfig, *, source: str) -> RunConfig:
     _require_choice(config, "device", DEVICE_CHOICES, source)
     _require_choice(config, "data_residency", DATA_RESIDENCY_CHOICES, source)
     _require_bool(config, "synchronize", source)
+    capture = config.capture
+    if capture is not None:
+        if not isinstance(capture, CaptureConfig):
+            capture = CaptureConfig.from_mapping(capture)
+        capture.validate_steps(config.steps)
+        config = replace(config, capture=capture)
     return config
 
 
