@@ -19,6 +19,7 @@ from shardscope.artifacts import (
     STEPS_CSV,
     SUMMARY_JSON,
     RunArtifacts,
+    checked_analysis,
     replace_file_contents,
     steps_csv_text,
 )
@@ -54,6 +55,7 @@ def render_json(run: RunArtifacts, *, indent: int = 2) -> str:
     parsers elsewhere will not. The alternative -- writing ``null`` -- would
     turn a recorded measurement into a missing one, which is worse.
     """
+    checked_analysis(run)
     payload = {
         **run.to_dict(),
         "availability": [status.to_dict() for status in field_statuses(run)],
@@ -68,6 +70,7 @@ def render_steps_csv(run: RunArtifacts) -> str:
     rendering a run to CSV and copying its per-step file cannot disagree
     about quoting.
     """
+    checked_analysis(run)
     return steps_csv_text(run.steps)
 
 
@@ -149,10 +152,12 @@ def write_report(
 
 
 def _refuse_source_collision(run: RunArtifacts, target: Path) -> None:
-    """Refuse an output path that is one of the run's recorded artifact files.ad."""
+    """Refuse an output path that is one of the run's recorded artifact files."""
     if not target.exists():
         return
-    names = {*run.artifact_names, STEPS_CSV, ENVIRONMENT_JSON, SUMMARY_JSON}
+    names = {*run.artifact_names, STEPS_CSV, ENVIRONMENT_JSON, SUMMARY_JSON, "analysis.json"}
+    if run.analysis is not None:
+        names.update(run.analysis["source"])
     for name in sorted(names):
         candidate = run.path / name
         try:

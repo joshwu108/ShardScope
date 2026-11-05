@@ -104,7 +104,7 @@ class TestFieldAvailability:
 
         # The host could have produced kernel activity; nothing captured it.
         assert status.state == NOT_RECORDED
-        assert "capture is unimplemented" in status.detail
+        assert "no persisted device timing" in status.detail
 
     def test_collectives_are_not_observed_on_a_host_that_cannot_run_ddp(self, make_run):
         environment = {

@@ -13,7 +13,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from shardscope.artifacts import ENVIRONMENT_JSON, STEPS_CSV, SUMMARY_JSON, RunArtifacts
+from shardscope.artifacts import (
+    ENVIRONMENT_JSON,
+    STEPS_CSV,
+    SUMMARY_JSON,
+    RunArtifacts,
+    checked_analysis,
+)
 from shardscope.env import NOT_OBSERVED, distributed_capable
 
 __all__ = [
@@ -65,7 +71,73 @@ class FieldStatus:
 
 def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
     """Availability of each report field in display order."""
-    return tuple(_STATUS_BUILDERS[field](run) for field in REPORT_FIELDS)
+    analysis = checked_analysis(run)
+    statuses = {field: _STATUS_BUILDERS[field](run) for field in REPORT_FIELDS}
+    if analysis is None:
+        return tuple(statuses.values())
+    for name in sorted({name for row in analysis["steps"] for name in row["measurements"]}):
+        values = [
+            row["measurements"][name] for row in analysis["steps"] if name in row["measurements"]
+        ]
+        recorded = sum(value["status"] == RECORDED for value in values)
+        state = (
+            RECORDED
+            if recorded
+            else (
+                NOT_OBSERVED if all(v["status"] == NOT_OBSERVED for v in values) else NOT_RECORDED
+            )
+        )
+        detail = (
+            f"analysis.json: {recorded}/{len(values)} step(s) recorded in ms; "
+            + (
+                "host ranges, not GPU execution or idle time. "
+                if name.startswith("host_")
+                else "device timing requires validated device evidence. "
+            )
+            + " ".join(dict.fromkeys(v["reason"] for v in values))
+        )
+        statuses[name] = FieldStatus(name, state, detail)
+    for old, explicit in (
+        ("data_wait_ms", "host_data_wait_ms"),
+        ("h2d_copy_ms", "host_h2d_ms"),
+        ("gpu_activity", "device_busy_ms"),
+        ("collective_activity", "device_collective_ms"),
+    ):
+        if explicit in statuses:
+            value = statuses[explicit]
+            statuses[old] = FieldStatus(
+                old, value.state, f"See explicit {explicit}: {value.detail}"
+            )
+    refs = [
+        ref
+        for row in analysis["steps"]
+        for value in row["measurements"].values()
+        for ref in value["evidence"]
+    ]
+    statuses["evidence_refs"] = FieldStatus(
+        "evidence_refs",
+        RECORDED if refs else NOT_RECORDED,
+        "analysis.json evidence uses source filename and original event-array index; "
+        "source digests and targets checked.",
+    )
+    statuses["per_rank_step_ms"] = FieldStatus(
+        "per_rank_step_ms",
+        RECORDED,
+        f"steps.csv durations for explicit rank {analysis['rank']}; "
+        "no cross-machine clock alignment.",
+    )
+    possible = any(f["status"] == "possible_input_wait" for f in analysis["findings"])
+    statuses["suspected_bottleneck"] = FieldStatus(
+        "suspected_bottleneck",
+        RECORDED if possible else NOT_RECORDED,
+        (
+            "Host loader-wait diagnostic is unconfigured; no threshold was supplied."
+            if analysis["rule_config"] is None
+            else "Persisted configured host-wait comparisons; possible input waiting "
+            "does not establish GPU starvation. No calibrated confidence or confirmed root cause."
+        ),
+    )
+    return tuple(statuses.values())
 
 
 def _step_time_ms(run: RunArtifacts) -> FieldStatus:
@@ -88,10 +160,8 @@ def _data_wait_ms(run: RunArtifacts) -> FieldStatus:
     return FieldStatus(
         "data_wait_ms",
         NOT_RECORDED,
-        "No loader-wait measurement exists in this run. The bounded profiler "
-        "capture is unimplemented. Its schedule, activity set and phase markers "
-        "are undefined, as is the loader-wait measurement contract: a phase "
-        "duration and time blocked on the loader iterator are different metrics.",
+        "No persisted host loader-wait measurement exists in this run. The measurement contract "
+        "uses explicit mapped host ranges; run offline analysis with a producer mapping.",
     )
 
 
@@ -120,8 +190,8 @@ def _h2d_copy_ms(run: RunArtifacts) -> FieldStatus:
         NOT_RECORDED,
         "This run used data_residency=host, so a per-step host-to-device copy "
         "does happen, but nothing measured it separately from the step: the "
-        "profiler capture is unimplemented and the per-step metric schema "
-        "has not been defined.",
+        "run has no persisted host or device copy measurement. Offline analysis requires "
+        "explicit phase markers and step mapping.",
     )
 
 
@@ -144,8 +214,8 @@ def _gpu_activity(run: RunArtifacts) -> FieldStatus:
         "gpu_activity",
         NOT_RECORDED,
         f"This run recorded {count} CUDA device(s), so kernel activity was "
-        "observable in principle, but no trace was captured: the bounded capture "
-        "is unimplemented and its trace layout has not been defined.",
+        "observable in principle, but no persisted device timing is attached. Device events "
+        "require validated activity classification and step attribution.",
     )
 
 
@@ -167,10 +237,9 @@ def _collective_activity(run: RunArtifacts) -> FieldStatus:
     return FieldStatus(
         "collective_activity",
         NOT_RECORDED,
-        f"This run recorded {count} CUDA device(s), but it is a single-device run "
-        "with no collective capture. DDP tracing requires a synchronization "
-        "strategy, a straggler fixture and compatible hardware. Overlapping "
-        "collectives must never be summed into step time.",
+        f"This run recorded {count} CUDA device(s), but no persisted collective measurement "
+        "is attached. Device inventory does not establish collective execution. "
+        "Overlapping collectives must never be summed into step time.",
     )
 
 
@@ -178,9 +247,8 @@ def _per_rank_step_ms(run: RunArtifacts) -> FieldStatus:
     return FieldStatus(
         "per_rank_step_ms",
         NOT_RECORDED,
-        f"{STEPS_CSV} carries no rank column: this is a single-device run. "
-        "Per-rank alignment arrives with the DDP block, which is unimplemented and "
-        "hardware-gated.",
+        f"{STEPS_CSV} carries no rank column and no validated analysis supplies explicit rank "
+        "identity. No cross-rank measurement is inferred from directory names.",
     )
 
 
@@ -188,9 +256,8 @@ def _suspected_bottleneck(run: RunArtifacts) -> FieldStatus:
     return FieldStatus(
         "suspected_bottleneck",
         NOT_RECORDED,
-        "No diagnosis is attached to this run. The rule engine is unimplemented, "
-        "and its thresholds remain undefined. This report "
-        "presents recorded measurements only; it does not attribute a cause.",
+        "No persisted diagnosis is attached to this run. Explicit thresholds and resolving "
+        "host-wait evidence are required; this report does not run analysis.",
     )
 
 
@@ -198,8 +265,8 @@ def _confidence_or_visibility(run: RunArtifacts) -> FieldStatus:
     return FieldStatus(
         "confidence_or_visibility",
         NOT_RECORDED,
-        "No confidence label is attached to this run. The vocabulary a rule may "
-        "emit, and the evidence each level requires, remain undefined.",
+        "No calibrated confidence label is attached to this run. Availability and explicit "
+        "configured comparisons do not establish a confidence score or confirmed cause.",
     )
 
 
@@ -210,9 +277,9 @@ def _evidence_refs(run: RunArtifacts) -> FieldStatus:
             "evidence_refs",
             NOT_RECORDED,
             "Trace file(s) are present in the run directory -- "
-            f"{', '.join(traces)} -- but this report does not read them: the trace "
-            "parser is unimplemented and the phase markers and metric schema "
-            "are undefined. Listing a trace does not imply it has been analyzed.",
+            f"{', '.join(traces)} -- but this report does not read them for new timings. "
+            "No validated analysis.json is attached. Listing a trace does not imply "
+            "it has been analyzed.",
         )
     return FieldStatus(
         "evidence_refs",
@@ -307,7 +374,7 @@ def _no_inventory_detail(problem: str) -> str:
         f"This run did not record a readable CUDA device inventory: {problem}. "
         "Whether this activity could have been observed therefore cannot be "
         "judged from the run's own provenance, and nothing captured it either "
-        "(bounded capture is unimplemented). Treating the "
+        "(no persisted device measurement is attached). Treating the "
         "absent inventory as zero devices would state a fact the run never "
         "recorded."
     )

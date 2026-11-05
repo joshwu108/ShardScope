@@ -13,6 +13,7 @@ from __future__ import annotations
 import html
 import json
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 from shardscope.artifacts import ENVIRONMENT_JSON, STEPS_CSV, SUMMARY_JSON, RunArtifacts
@@ -77,6 +78,7 @@ def render_html(
             _profiling_callout(run),
             _availability_section(run),
             _summary_section(run),
+            _analysis_section(run),
             _steps_section(run, max_rows=max_rows),
             _provenance_section(run),
             _notes_section(),
@@ -255,9 +257,9 @@ def _notes_section() -> str:
         "A field this run could not observe is shown as <code>not_observed</code> "
         "with the reason; a field nobody captured is shown as not recorded. "
         "Neither is rendered as zero.",
-        "No diagnosis, threshold or confidence label appears in this report. "
-        "Diagnostic thresholds and confidence criteria are not yet defined; "
-        "no inference is made from incomplete evidence.",
+        "Diagnostic comparisons appear only when persisted analysis supplies configuration "
+        "and evidence. Thresholds are not calibrated confidence or confirmed root causes; "
+        "host waiting does not establish GPU starvation.",
     )
     items = "\n".join(f"<li>{note}</li>" for note in notes)
     return "\n".join(("<h2>How to read this report</h2>", f'<ul class="notes">{items}</ul>'))
@@ -291,3 +293,71 @@ def _cell(value: Any) -> str:
     if isinstance(value, (Mapping, list, tuple)):
         return json.dumps(value, sort_keys=True)
     return str(value)  # pragma: no cover - JSON cannot produce another type
+
+
+def _analysis_section(run: RunArtifacts) -> str:
+    """Display only persisted values; evidence anchors identify source indices."""
+    analysis = run.analysis
+    if analysis is None:
+        return ""
+    refs = {}
+
+    def evidence_links(evidence):
+        links = []
+        for ref in evidence:
+            key = (ref["file"], ref["event_index"])
+            refs.setdefault(key, f"evidence-{len(refs)}")
+            label = f"{ref['file']} event[{ref['event_index']}]"
+            links.append(f'<a href="#{refs[key]}">{_esc(label)}</a>')
+        return ", ".join(links) or "none"
+
+    rows = []
+    for step in analysis["steps"]:
+        for name, metric in step["measurements"].items():
+            value = "unavailable" if metric["value_ms"] is None else _cell(metric["value_ms"])
+            rows.append(
+                f"<tr><td>{step['training_step']}</td><td>{_esc(name)}</td>"
+                f"<td>{_esc(value)}</td><td>{_esc(metric['status'])}</td>"
+                f"<td>{_esc(_cell(metric['basis']))}</td><td>{_esc(metric['scope'])}</td>"
+                f"<td>{_esc(metric['reason'])}</td><td>{evidence_links(metric['evidence'])}</td></tr>"
+            )
+    lines = [
+        "<h2>Persisted trace analysis</h2>",
+        f"<p>analysis.json schema 1; explicit rank {analysis['rank']}. "
+        "Host and device durations are distinct, in milliseconds. "
+        "Host copy calls are not device transfer time; host wait is not GPU idle time.</p>",
+        _table(
+            (
+                "training step",
+                "metric",
+                "ms",
+                "availability",
+                "basis",
+                "scope",
+                "reason",
+                "evidence",
+            ),
+            rows,
+        ),
+        "<h2>Configured diagnostic comparisons</h2>",
+    ]
+    for finding in analysis["findings"]:
+        lines.append(
+            f"<p>{_esc(finding['rule_id'])}: {_esc(finding['status'])}; "
+            f"steps {_esc(_cell(finding['steps']))}. {_esc(finding['interpretation'])}</p>"
+        )
+        comparison = {"inputs": finding["inputs"], "comparison": finding["comparison"]}
+        lines.append(f"<pre>{_esc(json.dumps(comparison, indent=2))}</pre>")
+        lines.append(f"<p>{evidence_links(finding['evidence'])}</p>")
+    lines.append("<h2>Analysis warnings</h2><ul>")
+    lines.extend(f"<li>{_esc(warning)}</li>" for warning in analysis["warnings"])
+    lines.append("</ul><h2>Analysis evidence</h2><ul>")
+    for (name, index), anchor in refs.items():
+        source = str((run.path / name).resolve())
+        url = Path(source).as_uri()
+        lines.append(
+            f'<li id="{anchor}"><a href="{_esc(url)}">{_esc(name)}</a>: '
+            f"original event-array index {index}; SHA-256 {_esc(analysis['source'][name])}</li>"
+        )
+    lines.append("</ul>")
+    return "\n".join(lines)
