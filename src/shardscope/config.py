@@ -23,6 +23,7 @@ __all__ = [
     "DEVICE_CHOICES",
     "SEED_MAX",
     "SEED_MIN",
+    "CaptureConfig",
     "RunConfig",
     "load_run_config",
 ]

@@ -26,56 +26,33 @@ def test_env_json_output_is_parseable(capsys):
     assert "torch_version" in payload
 
 
-PENDING_NAMES = [command.name for command in PENDING_COMMANDS]
+@pytest.mark.parametrize("command", ["profile", "bench", "compare"])
+def test_execution_commands_require_explicit_arguments(command, tmp_path):
+    with pytest.raises(SystemExit) as caught:
+        main([command])
+    assert caught.value.code == 2
+    assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("command", PENDING_NAMES)
-def test_unimplemented_commands_fail_loudly(command, capsys):
-    # Measurement classification depends on these staying distinct commands; a stub
-    # must exit non-zero rather than silently appear to succeed.
-    assert main([command]) == 2
-    assert "not implemented yet" in capsys.readouterr().err
+@pytest.mark.parametrize(
+    "command,flags",
+    [
+        ("profile", ["--config", "--out"]),
+        ("bench", ["--config", "--out", "--warmup", "--repeat", "--measured-steps"]),
+        ("compare", ["--baseline", "--candidate"]),
+    ],
+)
+def test_execution_interfaces_are_discoverable(command, flags, capsys):
+    with pytest.raises(SystemExit) as caught:
+        main([command, "--help"])
+    assert caught.value.code == 0
+    output = capsys.readouterr().out
+    assert "not implemented" not in output
+    assert all(flag in output for flag in flags)
 
 
-@pytest.mark.parametrize("command", PENDING_NAMES)
-def test_unimplemented_commands_name_the_decision_they_wait_on(command, capsys):
-    # Refusals must identify the missing measurement contract.
-    main([command])
-    err = capsys.readouterr().err
-
-    assert "Blocked on:" in err
-    assert "capture contract" in err or "benchmark methodology" in err
-
-
-@pytest.mark.parametrize("command", PENDING_COMMANDS, ids=PENDING_NAMES)
-def test_unimplemented_commands_have_no_side_effects(command, tmp_path, capsys):
-    # A refused command must not leave a half-built run directory behind.
-    before = set(tmp_path.iterdir())
-    argv = [command.name]
-    for option in command.options:
-        argv += [option.flag, str(tmp_path / f"{option.flag.lstrip('-')}-target")]
-
-    assert main(argv) == 2
-    assert set(tmp_path.iterdir()) == before
-
-
-def test_pending_command_options_match_the_declared_interface(capsys):
-    # Planned options remain discoverable even when execution is unavailable.
-    expected = {
-        "profile": ["--config", "--out"],
-        "bench": ["--config", "--out"],
-        "compare": ["--baseline", "--candidate"],
-    }
-    declared = {
-        command.name: [option.flag for option in command.options] for command in PENDING_COMMANDS
-    }
-
-    assert declared == expected
-
-
-def test_report_is_implemented_and_the_rest_still_are_not():
-    assert "report" not in PENDING_NAMES
-    assert PENDING_NAMES == ["profile", "bench", "compare"]
+def test_no_execution_command_is_pending():
+    assert PENDING_COMMANDS == ()
 
 
 def test_report_accepts_run_and_output_paths():
@@ -87,18 +64,18 @@ def test_report_accepts_run_and_output_paths():
 
 def test_memory_lab_commands_are_not_offered():
     # Memory sweeps are outside the supported command interface.
-    assert "memory-sweep" not in PENDING_NAMES
-    assert "memory-report" not in PENDING_NAMES
+    for command in ("memory-sweep", "memory-report"):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args([command])
 
 
-def test_help_marks_pending_commands_as_not_implemented(capsys):
+def test_help_lists_implemented_commands(capsys):
     with pytest.raises(SystemExit):
         main(["--help"])
-    out = capsys.readouterr().out
-
-    for name in PENDING_NAMES:
-        assert name in out
-    assert "not implemented" in out
+    output = capsys.readouterr().out
+    for name in ("env", "validate", "report", "profile", "bench", "compare"):
+        assert name in output
+    assert "not implemented" not in output
 
 
 class TestReportCommand:

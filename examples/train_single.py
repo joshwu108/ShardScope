@@ -15,264 +15,60 @@ the device. Moving it into the timed region would change ``--no-sync`` semantics
 from __future__ import annotations
 
 import argparse
-import csv
-import io
 import json
-import math
 import os
 import sys
-import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
-from torch import nn
 
-NUM_CLASSES = 10
-IMAGE_SIZE = 28
-DEFAULT_SAMPLES = 2048
-DEFAULT_BATCH_SIZE = 64
-DEFAULT_STEPS = 100
-DEFAULT_LEARNING_RATE = 0.01
-
-DATA_RESIDENCY_CHOICES = ("host", "device")
-DEVICE_CHOICES = ("auto", "cpu", "mps", "cuda")
-
-STEP_CSV_COLUMNS = (
-    "step",
-    "loss",
-    "step_time_ms",
-    "data_residency",
-    "synchronized",
+from shardscope import execution
+from shardscope.execution import (
+    DATA_RESIDENCY_CHOICES,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_SAMPLES,
+    DEFAULT_STEPS,
+    DEVICE_CHOICES,
+    _mps_is_usable,
+    step_csv_text,
+    summarize,
+)
+from shardscope.execution import (
+    IMAGE_SIZE as IMAGE_SIZE,
+)
+from shardscope.execution import (
+    NUM_CLASSES as NUM_CLASSES,
+)
+from shardscope.execution import (
+    STEP_CSV_COLUMNS as STEP_CSV_COLUMNS,
+)
+from shardscope.execution import (
+    StepRecord as StepRecord,
+)
+from shardscope.execution import (
+    _batch_index_schedule as _batch_index_schedule,
+)
+from shardscope.execution import (
+    build_model as build_model,
+)
+from shardscope.execution import (
+    make_synthetic_dataset as make_synthetic_dataset,
+)
+from shardscope.execution import (
+    write_step_csv as write_step_csv,
 )
 
 
-@dataclass(frozen=True)
-class StepRecord:
-    """One training iteration's measurement.
-
-    ``data_residency`` and ``synchronized`` travel with the number because a
-    step time is only comparable against another step time measured the same
-    way.
-    """
-
-    step: int
-    loss: float
-    step_time_ms: float
-    data_residency: str
-    synchronized: bool
-
-
-def make_synthetic_dataset(
-    n_samples: int,
-    seed: int,
-    *,
-    image_size: int = IMAGE_SIZE,
-    num_classes: int = NUM_CLASSES,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(images, labels)`` drawn from a seed-local generator.
-
-    Synthetic input exercises the training path without an accuracy target.
-    Shape, dtype and reproducibility determine fixture behavior.
-    """
-    if n_samples <= 0:
-        raise ValueError(f"n_samples must be positive, got {n_samples}")
-
-    generator = torch.Generator().manual_seed(seed)
-    images = torch.randn(
-        n_samples, 1, image_size, image_size, generator=generator, dtype=torch.float32
-    )
-    labels = torch.randint(0, num_classes, (n_samples,), generator=generator, dtype=torch.int64)
-    return images, labels
-
-
-def build_model(*, seed: int, num_classes: int = NUM_CLASSES) -> nn.Module:
-    """Build the small CNN, initialized deterministically for ``seed``.
-
-    ``fork_rng`` keeps the initialization from consuming global randomness.
-    """
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        return nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Flatten(),
-            nn.Linear(16 * 7 * 7, num_classes),
-        )
-
-
-def _mps_is_usable() -> bool:
-    backend = getattr(torch.backends, "mps", None)
-    if backend is None:
-        return False
-    try:
-        return bool(backend.is_available())
-    except Exception:  # pragma: no cover - platform-specific
-        return False
-
-
-def resolve_device(request: str) -> torch.device:
-    """Turn a device request into a concrete device, falling back honestly."""
-    if request not in DEVICE_CHOICES:
-        raise ValueError(f"unknown device {request!r}; choose from {DEVICE_CHOICES}")
+def resolve_device(request):
     if request == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if _mps_is_usable():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(request)
+        request = "cuda" if torch.cuda.is_available() else "mps" if _mps_is_usable() else "cpu"
+    return execution.resolve_device(request)
 
 
-def _synchronize(device: torch.device) -> None:
-    """Drain the device queue so a wall-clock reading means what it says."""
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
-def _batch_index_schedule(n_samples: int, batch_size: int, steps: int, seed: int) -> torch.Tensor:
-    """Indices for every step, as one ``(steps, batch_size)`` tensor.
-
-    One seeded permutation, wrapped around as needed. Computing it up front
-    keeps batch selection identical across residency modes and devices.
-    """
-    generator = torch.Generator().manual_seed(seed + 1)
-    order = torch.randperm(n_samples, generator=generator)
-    needed = steps * batch_size
-    repeats = -(-needed // n_samples)  # ceiling division
-    flat = order.repeat(repeats)[:needed]
-    return flat.view(steps, batch_size)
-
-
-def run_training(
-    *,
-    steps: int,
-    batch_size: int,
-    device: str = "auto",
-    seed: int = 0,
-    data_residency: str = "host",
-    synchronize: bool = True,
-    n_samples: int = DEFAULT_SAMPLES,
-    learning_rate: float = DEFAULT_LEARNING_RATE,
-) -> tuple[StepRecord, ...]:
-    """Train for ``steps`` iterations and return one record per step."""
-    if steps <= 0:
-        raise ValueError(f"steps must be positive, got {steps}")
-    if batch_size <= 0:
-        raise ValueError(f"batch_size must be positive, got {batch_size}")
-    if data_residency not in DATA_RESIDENCY_CHOICES:
-        raise ValueError(
-            f"data_residency must be one of {DATA_RESIDENCY_CHOICES}, got {data_residency!r}"
-        )
-
-    target = resolve_device(device)
-    images, labels = make_synthetic_dataset(n_samples=n_samples, seed=seed)
-    if data_residency == "device":
-        images = images.to(target)
-        labels = labels.to(target)
-
-    model = build_model(seed=seed).to(target)
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-    loss_fn = nn.CrossEntropyLoss()
-    schedule = _batch_index_schedule(n_samples, batch_size, steps, seed)
-
-    records: list[StepRecord] = []
-    for step in range(steps):
-        indices = schedule[step]
-        if synchronize:
-            _synchronize(target)
-        started = time.perf_counter()
-
-        batch_images = images[indices]
-        batch_labels = labels[indices]
-        if data_residency == "host":
-            batch_images = batch_images.to(target)
-            batch_labels = batch_labels.to(target)
-
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(batch_images)
-        loss = loss_fn(logits, batch_labels)
-        loss.backward()
-        optimizer.step()
-
-        if synchronize:
-            _synchronize(target)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-
-        # Read the loss only after the timer stops: .item() blocks on the
-        # device, which would make --no-sync silently synchronize.
-        records.append(
-            StepRecord(
-                step=step,
-                loss=float(loss.detach().item()),
-                step_time_ms=elapsed_ms,
-                data_residency=data_residency,
-                synchronized=synchronize,
-            )
-        )
-
-    return tuple(records)
-
-
-def step_csv_text(records: Sequence[StepRecord]) -> str:
-    """Render per-step records as CSV text.
-
-    ``\n`` line endings, explicitly: the csv module defaults to ``\r\n``,
-    and ``shardscope.artifacts.steps_csv_text`` -- the reader's rendering,
-    which ``shardscope report --format csv`` emits -- writes ``\n``. The two
-    have to agree byte for byte or "the CSV view is the recorded file" is
-    only true after newline translation.
-    """
-    if not records:
-        raise ValueError("refusing to write a step CSV with no records")
-
-    buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(buffer, fieldnames=list(STEP_CSV_COLUMNS), lineterminator="\n")
-    writer.writeheader()
-    for record in records:
-        writer.writerow(asdict(record))
-    return buffer.getvalue()
-
-
-def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
-    """Write per-step records to ``path``, replacing any existing file whole."""
-    from shardscope.artifacts import replace_file_contents
-
-    replace_file_contents(path, step_csv_text(records))
-
-
-def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
-    """Plain descriptive statistics over a run's step times.
-
-    Nearest-rank percentile, so every reported figure is an actual observed
-    step time rather than an interpolation between two of them.
-
-    These come from a *timed* run, not from the warm unprofiled benchmark
-    harness (benchmark methodology not implemented), and must not be quoted as throughput
-    results.
-    """
-    if not records:
-        raise ValueError("refusing to summarize an empty record set")
-
-    times = sorted(record.step_time_ms for record in records)
-    count = len(times)
-    midpoint = count // 2
-    median = times[midpoint] if count % 2 else (times[midpoint - 1] + times[midpoint]) / 2
-    p95_index = min(count - 1, math.ceil(0.95 * count) - 1)
-    return {
-        "steps": float(count),
-        "median_step_ms": median,
-        "p95_step_ms": times[p95_index],
-        "min_step_ms": times[0],
-        "max_step_ms": times[-1],
-    }
+def run_training(*, device="auto", **kwargs):
+    return execution.run_training(device=str(resolve_device(device)), **kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -347,8 +143,7 @@ def _resolve_config(args):
 
 
 def out_dir_problem(out_dir: Path) -> str | None:
-    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r.
-    """
+    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r."""
     if out_dir.exists() and not out_dir.is_dir():
         return (
             f"--out-dir {out_dir} exists and is not a directory. Point it at a new "
@@ -366,8 +161,7 @@ def out_dir_problem(out_dir: Path) -> str | None:
 
 
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
-    """Write the artifact triple, each file landing whole or not at all.
-    """
+    """Write the artifact triple, each file landing whole or not at all."""
     from shardscope.artifacts import replace_file_contents
     from shardscope.env import capture_environment
 

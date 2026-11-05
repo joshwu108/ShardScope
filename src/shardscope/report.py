@@ -149,8 +149,7 @@ def write_report(
 
 
 def _refuse_source_collision(run: RunArtifacts, target: Path) -> None:
-    """Refuse an output path that is one of the run's recorded artifact files.ad.
-    """
+    """Refuse an output path that is one of the run's recorded artifact files.ad."""
     if not target.exists():
         return
     names = {*run.artifact_names, STEPS_CSV, ENVIRONMENT_JSON, SUMMARY_JSON}

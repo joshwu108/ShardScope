@@ -1,5 +1,4 @@
-"""Check that a run directory is a recording that can be reported.
-"""
+"""Check that a run directory is a recording that can be reported."""
 
 from __future__ import annotations
 

@@ -22,7 +22,6 @@ contract today.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -135,7 +134,7 @@ class TestInstallation:
         assert completed.returncode == 0, completed.stderr
         for name in ("env", "report", "profile", "bench", "compare"):
             assert name in completed.stdout
-        assert "not implemented" in completed.stdout
+        assert "not implemented" not in completed.stdout
 
     @requires_install
     def test_an_unknown_command_exits_two_without_a_traceback(self):
@@ -310,45 +309,13 @@ class TestReportProcess:
         assert "BrokenPipeError" not in stderr
 
 
-class TestUnimplementedScriptsRefuseCleanly:
-    """A stub that waits on a decision must not look like a crash.
-
-    These scripts are runnable, so someone will run them. Exiting 1 with a
-    ``NotImplementedError`` traceback reads as a broken harness; exiting 2
-    with one line naming the open decision reads as what it is.
-    """
-
+class TestExecutionScripts:
     @pytest.mark.parametrize("script", ["run_baseline.py", "compare.py"])
-    def test_they_exit_two_naming_the_missing_benchmark_methodology(self, script):
-        completed = _run([sys.executable, str(BENCHMARKS / script)])
-
-        _assert_refused_with_one_line(completed, contains="benchmark methodology")
-        assert completed.stdout == ""
-        assert "not implemented" in completed.stderr
-
-    def test_both_name_the_same_blocker(self):
-        # One methodology decision blocks both. Two spellings of it would
-        # drift, and a reader would not know whether that mattered.
-        first = _run([sys.executable, str(BENCHMARKS / "run_baseline.py")]).stderr
-        second = _run([sys.executable, str(BENCHMARKS / "compare.py")]).stderr
-
-        assert first.split("Blocked on:")[1] == second.split("Blocked on:")[1]
-
-
-class TestPendingCommandsRefuseCleanly:
-    @requires_install
-    @pytest.mark.parametrize("command", ["profile", "bench", "compare"])
-    def test_they_exit_two_naming_a_decision_and_create_nothing(self, command, tmp_path):
-        target = tmp_path / "should-not-exist"
-        argv = ["--out", str(target)] if command != "compare" else ["--baseline", str(target)]
-
-        completed = _cli(command, *argv)
-
-        _assert_refused_with_one_line(
-            completed, contains="contract" if command == "profile" else "methodology"
-        )
-        assert not target.exists()
-        assert os.listdir(tmp_path) == []
+    def test_scripts_expose_implemented_interfaces(self, script):
+        completed = _run([sys.executable, str(BENCHMARKS / script), "--help"])
+        assert completed.returncode == 0
+        assert "usage:" in completed.stdout
+        assert "not implemented" not in completed.stdout
 
 
 class TestRecordedBytes:
