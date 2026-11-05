@@ -67,8 +67,161 @@ def resolve_device(request):
     return execution.resolve_device(request)
 
 
-def run_training(*, device="auto", **kwargs):
-    return execution.run_training(device=str(resolve_device(device)), **kwargs)
+def _synchronize(device: torch.device) -> None:
+    """Drain the device queue so a wall-clock reading means what it says."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+def _batch_index_schedule(n_samples: int, batch_size: int, steps: int, seed: int) -> torch.Tensor:
+    """Indices for every step, as one ``(steps, batch_size)`` tensor.
+
+    One seeded permutation, wrapped around as needed. Computing it up front
+    keeps batch selection identical across residency modes and devices.
+    """
+    generator = torch.Generator().manual_seed(seed + 1)
+    order = torch.randperm(n_samples, generator=generator)
+    needed = steps * batch_size
+    repeats = -(-needed // n_samples)  # ceiling division
+    flat = order.repeat(repeats)[:needed]
+    return flat.view(steps, batch_size)
+
+
+def run_training(
+    *,
+    steps: int,
+    batch_size: int,
+    device: str = "auto",
+    seed: int = 0,
+    data_residency: str = "host",
+    synchronize: bool = True,
+    n_samples: int = DEFAULT_SAMPLES,
+    learning_rate: float = DEFAULT_LEARNING_RATE,
+) -> tuple[StepRecord, ...]:
+    """Train for ``steps`` iterations and return one record per step."""
+    if steps <= 0:
+        raise ValueError(f"steps must be positive, got {steps}")
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if data_residency not in DATA_RESIDENCY_CHOICES:
+        raise ValueError(
+            f"data_residency must be one of {DATA_RESIDENCY_CHOICES}, got {data_residency!r}"
+        )
+
+    # fetch device from device str
+    target = resolve_device(device)
+    images, labels = make_synthetic_dataset(n_samples=n_samples, seed=seed)
+    if data_residency == "device":
+        images = images.to(target)
+        labels = labels.to(target)
+
+    # build small neural network
+    model = build_model(seed=seed).to(target)
+
+    # updates the model's weights
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+    # measures how wrong preds are to labels
+    loss_fn = nn.CrossEntropyLoss()
+
+    # schedule which samples belong to each training batch
+    schedule = _batch_index_schedule(n_samples, batch_size, steps, seed)
+
+    records: list[StepRecord] = []
+    for step in range(steps):
+        indices = schedule[step]
+
+        # wait for previous work to finish
+        if synchronize:
+            _synchronize(target)
+        started = time.perf_counter()
+
+        # fetch next images
+        batch_images = images[indices]
+        batch_labels = labels[indices]
+        if data_residency == "host":
+            batch_images = batch_images.to(target)
+            batch_labels = batch_labels.to(target)
+
+        optimizer.zero_grad(set_to_none=True) # clear gradients
+        logits = model(batch_images) #forward pass
+        loss = loss_fn(logits, batch_labels) # calculate loss
+        loss.backward() # backward step
+        optimizer.step() #adjust weights using gradients
+
+        if synchronize:
+            _synchronize(target)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        # Read the loss only after the timer stops: .item() blocks on the
+        # device, which would make --no-sync silently synchronize.
+        records.append(
+            StepRecord(
+                step=step,
+                loss=float(loss.detach().item()),
+                step_time_ms=elapsed_ms,
+                data_residency=data_residency,
+                synchronized=synchronize,
+            )
+        )
+
+    return tuple(records)
+
+
+def step_csv_text(records: Sequence[StepRecord]) -> str:
+    """Render per-step records as CSV text.
+
+    ``\n`` line endings, explicitly: the csv module defaults to ``\r\n``,
+    and ``shardscope.artifacts.steps_csv_text`` -- the reader's rendering,
+    which ``shardscope report --format csv`` emits -- writes ``\n``. The two
+    have to agree byte for byte or "the CSV view is the recorded file" is
+    only true after newline translation.
+    """
+    if not records:
+        raise ValueError("refusing to write a step CSV with no records")
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=list(STEP_CSV_COLUMNS), lineterminator="\n")
+    writer.writeheader()
+    for record in records:
+        writer.writerow(asdict(record))
+    return buffer.getvalue()
+
+
+def write_step_csv(path: str | Path, records: Sequence[StepRecord]) -> None:
+    """Write per-step records to ``path``, replacing any existing file whole."""
+    from shardscope.artifacts import replace_file_contents
+
+    replace_file_contents(path, step_csv_text(records))
+
+
+def summarize(records: Sequence[StepRecord]) -> dict[str, float]:
+    """Plain descriptive statistics over a run's step times.
+
+    Nearest-rank percentile, so every reported figure is an actual observed
+    step time rather than an interpolation between two of them.
+
+    These come from a *timed* run, not from the warm unprofiled benchmark
+    harness (benchmark methodology not implemented), and must not be quoted as throughput
+    results.
+    """
+    if not records:
+        raise ValueError("refusing to summarize an empty record set")
+
+    times = sorted(record.step_time_ms for record in records)
+    count = len(times)
+    midpoint = count // 2
+    median = times[midpoint] if count % 2 else (times[midpoint - 1] + times[midpoint]) / 2
+    p95_index = min(count - 1, math.ceil(0.95 * count) - 1)
+    return {
+        "steps": float(count),
+        "median_step_ms": median,
+        "p95_step_ms": times[p95_index],
+        "min_step_ms": times[0],
+        "max_step_ms": times[-1],
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -189,8 +342,10 @@ def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) ->
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # build the arguments and flags to be used by the CLI
     args = build_parser().parse_args(argv)
 
+    # fetch the config
     config, error = _resolve_config(args)
     if error is not None:
         print(f"error: {error}", file=sys.stderr)
@@ -202,6 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: {problem}", file=sys.stderr)
             return 2
 
+    # training pipeline
     records = run_training(
         steps=config.steps,
         batch_size=config.batch_size,
