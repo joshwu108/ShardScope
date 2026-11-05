@@ -347,8 +347,7 @@ def _resolve_config(args):
 
 
 def out_dir_problem(out_dir: Path) -> str | None:
-    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r.
-    """
+    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r."""
     if out_dir.exists() and not out_dir.is_dir():
         return (
             f"--out-dir {out_dir} exists and is not a directory. Point it at a new "
@@ -366,8 +365,7 @@ def out_dir_problem(out_dir: Path) -> str | None:
 
 
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
-    """Write the artifact triple, each file landing whole or not at all.
-    """
+    """Write the artifact triple, each file landing whole or not at all."""
     from shardscope.artifacts import replace_file_contents
     from shardscope.env import capture_environment
 
