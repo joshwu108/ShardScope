@@ -55,13 +55,7 @@ STEP_CSV_COLUMNS = (
 
 @dataclass(frozen=True)
 class StepRecord:
-    """One training iteration's measurement.
-
-    ``data_residency`` and ``synchronized`` travel with the number because a
-    step time is only comparable against another step time measured the same
-    way.
-    """
-
+    """One training iteration's measurement."""
     step: int
     loss: float
     step_time_ms: float
@@ -76,11 +70,7 @@ def make_synthetic_dataset(
     image_size: int = IMAGE_SIZE,
     num_classes: int = NUM_CLASSES,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(images, labels)`` drawn from a seed-local generator.
-
-    Synthetic input exercises the training path without an accuracy target.
-    Shape, dtype and reproducibility determine fixture behavior.
-    """
+    """Return ``(images, labels)`` drawn from a seed-local generator."""
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive, got {n_samples}")
 

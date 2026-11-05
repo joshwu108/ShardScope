@@ -79,6 +79,53 @@ def load_step_map(path: Path) -> tuple[StepMapping, ...]:
         result.append(StepMapping(**item))
     return tuple(result)
 
+def load_capture_step_map(
+    capture: dict | None,
+    *,
+    rank: int,
+) -> tuple[StepMapping, ...]:
+    if capture is None:
+        return ()
+    if not isinstance(capture, dict):
+        raise ArtifactError("extra.capture must be an object")
+
+    schema = capture.get("step_map_schema")
+    if type(schema) is not int or schema != 1:
+        raise ArtifactError("unsupported capture step_map_schema")
+
+    steps = capture.get("step_map")
+    if not isinstance(steps, list):
+        raise ArtifactError("Unsupported step_map type")
+
+    results = []
+    for index, step in enumerate(steps):
+        location = f"capture.step_map[{index}]"
+
+        if not isinstance(step, dict):
+            raise ArtifactError(f"{location}: expected an object")
+
+        step_rank = step.get("rank")
+        if type(step_rank) is not int or step_rank != rank:
+            raise ArtifactError(f"{location}: rank must match run {rank}")
+        trace_file = step.get("trace_file")
+        event_index = step.get("step_event_index")
+        training_step = step.get("training_step")
+
+        if not _filename(trace_file):
+            raise ArtifactError(f"{location}: trace_file must be a local filename")
+        if type(event_index) is not int or event_index < 0:
+            raise ArtifactError(f"{location}: step_event_index must be nonnegative")
+        if type(training_step) is not int or training_step < 0:
+            raise ArtifactError(f"{location}: training_step must be nonnegative")
+        results.append(
+            StepMapping(
+                trace_file=trace_file,
+                event_index=event_index,
+                training_step=training_step
+            )
+        )
+    return tuple(results)
+
 
 def analyze_run(
     path: str | Path,
@@ -125,7 +172,17 @@ def analyze_run(
     if recorded_rank is not None and (type(recorded_rank) is not int or recorded_rank != rank):
         raise ArtifactError("explicit rank disagrees with environment.extra.rank")
     traces = tuple(parse_trace(directory / name) for name in trace_files)
-    mappings = load_step_map(directory / step_map_file) if step_map_file else ()
+
+    capture = run.extra.get("capture")
+    if step_map_file:
+        mapping_source = "file"
+        mappings = load_step_map(directory / step_map_file)
+    elif capture is not None:
+        mapping_source = "capture"
+        mappings = load_capture_step_map(capture, rank=rank)
+    else:
+        mapping_source = "none"
+        mappings = ()
     unavailable = {}
     if run.environment.get("cuda_available") is False or run.environment.get("device_count") == 0:
         unavailable = dict.fromkeys(DEVICE_METRICS, "recorded environment has no CUDA device")
@@ -163,6 +220,7 @@ def analyze_run(
         "warnings": warnings,
         "rule_config": config.to_dict() if config else None,
         "mapping_file": step_map_file,
+        "mapping_source": mapping_source,
         "rank_basis": "environment.extra.rank"
         if recorded_rank is not None
         else "explicit_argument",

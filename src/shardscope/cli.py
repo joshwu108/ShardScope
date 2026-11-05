@@ -5,6 +5,7 @@ artifacts, and ``report`` renders HTML, JSON or CSV without adding measurements.
 
 ``profile`` captures diagnostic traces; ``bench`` measures unprofiled windows
 and ``compare`` reports descriptive differences with significance unconfigured.
+``analyze`` persists offline host-range analysis using explicit step mappings.
 Diagnostic and throughput measurements remain separate commands.
 Memory sweeps are outside the current command interface.
 """
@@ -145,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--baseline", type=Path, required=True)
     compare.add_argument("--candidate", type=Path, required=True)
 
+    from shardscope.analysis import add_arguments
+
+    analyze = sub.add_parser("analyze", help="analyze saved traces with explicit step mappings")
+    add_arguments(analyze)
+
     return parser
 
 
@@ -182,6 +188,11 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if args.command == "report":
         return _run_report(args)
+
+    if args.command == "analyze":
+        from shardscope.analysis import run_arguments
+
+        return run_arguments(args)
 
     if args.command == "profile":
         from shardscope.capture import profile_run

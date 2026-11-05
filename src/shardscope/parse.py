@@ -21,7 +21,7 @@ from shardscope.errors import ArtifactError
 
 @dataclass(frozen=True)
 class Trace:
-    """Original events, metadata and digest of the exact (possibly gzip) bytes."""
+    """Original events, metadata and digest of the exact bytes."""
 
     path: Path
     events: tuple[dict[str, Any], ...]
