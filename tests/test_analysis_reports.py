@@ -42,7 +42,7 @@ def test_load_validate_json_roundtrip_and_csv_compatibility(make_run):
     result = validate_run(directory)
     assert result.ok
     assert result.to_dict()["analysis"] == {"present": True, "validated": True}
-    assert "producer step-map" in " ".join(result.warnings)
+    assert set(payload["warnings"]) <= set(result.warnings)
     restored = RunArtifacts.from_dict(json.loads(render_json(run)))
     assert restored == run
     assert render_steps_csv(run) == render_steps_csv(legacy)

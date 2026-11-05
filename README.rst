@@ -221,22 +221,25 @@ Trace analysis
 ==============
 
 Analysis reads a profiled run and writes ``analysis.json`` next to its
-artifacts. Steps are attributed through an explicit step-map file in the run
-directory:
+artifacts. By default it uses the versioned step mapping recorded in
+``environment.json.extra.capture`` and verifies that each entry matches the
+run's rank and an actual trace boundary. Run it through the installed command:
+
+.. code-block:: console
+
+   $ shardscope analyze --run runs/delayed --loader-wait-threshold-ms 5
+
+The threshold above is an explicit example, not a calibrated recommendation.
+``python -m shardscope.analysis`` supports the same arguments. A supplied
+``--step-map`` overrides the embedded mapping. Its file must be inside the run
+directory and use this consumer format:
 
 .. code-block:: json
 
    {"mappings": [{"trace_file": "trace-00000.json", "event_index": 7, "training_step": 2}]}
 
-Generate it from the map that ``profile`` recorded, then run the analysis:
-
-.. code-block:: console
-
-   $ jq '{mappings: [.extra.capture.step_map[]
-          | {trace_file, event_index: .step_event_index, training_step}]}' \
-       runs/delayed/environment.json > runs/delayed/step-map.json
-   $ python -m shardscope.analysis --run runs/delayed --step-map step-map.json \
-       --loader-wait-threshold-ms 5
+Missing mappings remain unavailable. Unsupported or malformed mappings fail
+analysis; an invalid explicit file never silently falls back to capture metadata.
 
 Options:
 
@@ -405,8 +408,8 @@ Known limitations
 
 - Device-side kernel, copy, and collective attribution is not reported.
   Raw device events are preserved in the trace files.
-- Analysis requires an explicit step-map file and runs as
-  ``python -m shardscope.analysis`` rather than a ``shardscope`` subcommand.
+- Analysis currently measures host ranges only. An embedded or explicit step
+  mapping is required to attribute those ranges to training steps.
 - Capture on MPS is not supported.
 - ``examples/train_single.py --device cuda`` on a host without CUDA fails
   with a PyTorch error rather than a configuration error.
@@ -474,6 +477,6 @@ Exit code ``141`` when piping to ``head``
   output.
 
 License
-=======
+========
 
 MIT.

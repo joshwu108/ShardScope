@@ -56,6 +56,7 @@ STEP_CSV_COLUMNS = (
 @dataclass(frozen=True)
 class StepRecord:
     """One training iteration's measurement."""
+
     step: int
     loss: float
     step_time_ms: float

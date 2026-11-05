@@ -1,9 +1,9 @@
 """Explicit offline analysis: python -m shardscope.analysis --run DIR.
 
-The producer-map adapter is pending. --step-map names a consumer mapping file
-inside the run: {"mappings": [{"trace_file": "trace-00000.json",
-"event_index": 0, "training_step": 12}]}. Indices address original arrays.
-Rank is supplied explicitly or read from environment.json.extra.rank.
+An explicit --step-map selects a consumer mapping file inside the run.
+Otherwise analysis uses the capture mapping recorded in environment.json.
+Indices address original event arrays. Rank is supplied explicitly or read
+from environment.json.extra.rank.
 """
 
 from __future__ import annotations
@@ -79,6 +79,7 @@ def load_step_map(path: Path) -> tuple[StepMapping, ...]:
         result.append(StepMapping(**item))
     return tuple(result)
 
+
 def load_capture_step_map(
     capture: dict | None,
     *,
@@ -118,11 +119,7 @@ def load_capture_step_map(
         if type(training_step) is not int or training_step < 0:
             raise ArtifactError(f"{location}: training_step must be nonnegative")
         results.append(
-            StepMapping(
-                trace_file=trace_file,
-                event_index=event_index,
-                training_step=training_step
-            )
+            StepMapping(trace_file=trace_file, event_index=event_index, training_step=training_step)
         )
     return tuple(results)
 
@@ -174,7 +171,7 @@ def analyze_run(
     traces = tuple(parse_trace(directory / name) for name in trace_files)
 
     capture = run.extra.get("capture")
-    if step_map_file:
+    if step_map_file is not None:
         mapping_source = "file"
         mappings = load_step_map(directory / step_map_file)
     elif capture is not None:
@@ -205,12 +202,7 @@ def analyze_run(
             metrics[metric] = measurement(None, reason=reason, status="not_observed")
         steps.append({"training_step": step, "boundary": None, "measurements": metrics})
     steps.sort(key=lambda item: item["training_step"])
-    warnings.extend(
-        [
-            "thresholds are caller configuration, not hardware-calibrated defaults",
-            "producer step-map JSON integration pending; consumer map used only when explicit",
-        ]
-    )
+    warnings.append("thresholds are caller configuration, not hardware-calibrated defaults")
     payload = {
         "schema_version": 1,
         "rank": rank,
@@ -292,9 +284,33 @@ def validate_analysis(
     _require(
         mapping is None or (isinstance(mapping, str) and mapping in source), "invalid mapping_file"
     )
-    mapped = None
-    if directory is not None and mapping is not None:
+    # Older sidecars used only explicit mapping files and have no source label.
+    mapping_source = payload.get("mapping_source", "file" if mapping is not None else "none")
+    _require(mapping_source in ("file", "capture", "none"), "invalid mapping_source")
+    if mapping_source == "file":
+        _require(mapping is not None, "file mapping_source requires mapping_file provenance")
+    else:
+        _require(mapping is None, "mapping_file conflicts with mapping_source")
+    entries = None
+    if mapping_source == "file" and directory is not None:
         entries = load_step_map(directory / mapping)
+    elif mapping_source == "capture":
+        mapping_environment = environment
+        if directory is not None:
+            mapping_environment = read_json_bytes(
+                _bytes(directory / "environment.json"), source=str(directory / "environment.json")
+            )
+        if mapping_environment is not None:
+            _require(
+                isinstance(mapping_environment, dict), "capture mapping requires environment object"
+            )
+            extra = mapping_environment.get("extra")
+            _require(isinstance(extra, dict), "capture mapping requires environment.extra")
+            capture = extra.get("capture")
+            _require(isinstance(capture, dict), "capture mapping metadata is missing")
+            entries = load_capture_step_map(capture, rank=rank)
+    mapped = None
+    if entries is not None:
         mapped = {}
         targets = set()
         for entry in entries:
@@ -307,6 +323,12 @@ def validate_analysis(
                 "invalid mapped event index",
             )
             _require(entry.training_step not in mapped, "duplicate mapped training step")
+            _require(
+                entry.trace_file in source
+                and entry.trace_file
+                not in ("steps.csv", "environment.json", "summary.json", mapping),
+                "step map names a file absent from trace sources",
+            )
             target = (entry.trace_file, entry.event_index)
             _require(target not in targets, "same boundary mapped to multiple training steps")
             targets.add(target)
@@ -353,8 +375,8 @@ def validate_analysis(
         _require("boundary" in row, "step missing boundary field")
         boundary_ref = row.get("boundary")
         _require(
-            boundary_ref is None or mapping is not None,
-            "mapped boundary requires explicit mapping_file provenance",
+            boundary_ref is None or mapping_source in ("file", "capture"),
+            "mapped boundary requires mapping_file provenance or capture mapping provenance",
         )
         boundary = reference(boundary_ref) if boundary_ref is not None else None
         if boundary is not None:
@@ -517,7 +539,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run", required=True, type=Path)
     parser.add_argument("--rank", type=int)
     parser.add_argument(
-        "--step-map", help="consumer map filename within run; producer adapter pending"
+        "--step-map", help="consumer map filename within run; overrides embedded capture mapping"
     )
     parser.add_argument(
         "--trace", action="append", help="trace filename within run; repeat for cycles"
