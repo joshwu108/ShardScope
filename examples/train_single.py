@@ -172,35 +172,46 @@ def run_training(
             f"data_residency must be one of {DATA_RESIDENCY_CHOICES}, got {data_residency!r}"
         )
 
+    # fetch device from device str
     target = resolve_device(device)
     images, labels = make_synthetic_dataset(n_samples=n_samples, seed=seed)
     if data_residency == "device":
         images = images.to(target)
         labels = labels.to(target)
 
+    # build small neural network
     model = build_model(seed=seed).to(target)
+
+    # updates the model's weights
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+    # measures how wrong preds are to labels
     loss_fn = nn.CrossEntropyLoss()
+
+    # schedule which samples belong to each training batch
     schedule = _batch_index_schedule(n_samples, batch_size, steps, seed)
 
     records: list[StepRecord] = []
     for step in range(steps):
         indices = schedule[step]
+
+        # wait for previous work to finish
         if synchronize:
             _synchronize(target)
         started = time.perf_counter()
 
+        # fetch next images
         batch_images = images[indices]
         batch_labels = labels[indices]
         if data_residency == "host":
             batch_images = batch_images.to(target)
             batch_labels = batch_labels.to(target)
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(batch_images)
-        loss = loss_fn(logits, batch_labels)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True) # clear gradients
+        logits = model(batch_images) #forward pass
+        loss = loss_fn(logits, batch_labels) # calculate loss
+        loss.backward() # backward step
+        optimizer.step() #adjust weights using gradients
 
         if synchronize:
             _synchronize(target)
@@ -395,8 +406,10 @@ def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) ->
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # build the arguments and flags to be used by the CLI
     args = build_parser().parse_args(argv)
 
+    # fetch the config
     config, error = _resolve_config(args)
     if error is not None:
         print(f"error: {error}", file=sys.stderr)
@@ -408,6 +421,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: {problem}", file=sys.stderr)
             return 2
 
+    # training pipeline
     records = run_training(
         steps=config.steps,
         batch_size=config.batch_size,
