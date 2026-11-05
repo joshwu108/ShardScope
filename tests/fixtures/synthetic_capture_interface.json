@@ -1,0 +1,299 @@
+{
+  "synthetic": true,
+  "description": "Hand-written software interface example; no measured timings or hardware evidence.",
+  "environment_extra": {
+    "artifact_schema": 1,
+    "profiled": true,
+    "rank": 0,
+    "local_rank": 0,
+    "world_size": 1,
+    "hostname": "synthetic-host",
+    "pid": 1,
+    "capture": {
+      "wait": 1,
+      "warmup": 1,
+      "active": 2,
+      "repeat": 2,
+      "activities": [
+        "cpu"
+      ],
+      "record_shapes": false,
+      "profile_memory": false,
+      "with_stack": false,
+      "with_flops": false,
+      "device_resolved": "cpu",
+      "step_map_schema": 1,
+      "data_wait": "not_recorded: synthetic tensor indexing; no loader iterator",
+      "trace_files": [
+        "trace-00000.json",
+        "trace-00001.json"
+      ],
+      "step_map": [
+        {
+          "rank": 0,
+          "training_step": 2,
+          "trace_file": "trace-00000.json",
+          "step_event_index": 1,
+          "identity_event_index": 2,
+          "profiler_step_event_index": 0,
+          "profiler_step_name": "ProfilerStep#42"
+        },
+        {
+          "rank": 0,
+          "training_step": 3,
+          "trace_file": "trace-00000.json",
+          "step_event_index": 7,
+          "identity_event_index": 8,
+          "profiler_step_event_index": 6,
+          "profiler_step_name": "ProfilerStep#43"
+        },
+        {
+          "rank": 0,
+          "training_step": 6,
+          "trace_file": "trace-00001.json",
+          "step_event_index": 1,
+          "identity_event_index": 2,
+          "profiler_step_event_index": 0,
+          "profiler_step_name": "ProfilerStep#52"
+        },
+        {
+          "rank": 0,
+          "training_step": 7,
+          "trace_file": "trace-00001.json",
+          "step_event_index": 7,
+          "identity_event_index": 8,
+          "profiler_step_event_index": 6,
+          "profiler_step_name": "ProfilerStep#53"
+        }
+      ]
+    }
+  },
+  "traces": {
+    "trace-00000.json": {
+      "synthetic": true,
+      "traceEvents": [
+        {
+          "name": "ProfilerStep#42",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 0,
+          "dur": 100
+        },
+        {
+          "name": "shardscope/step",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 1,
+          "dur": 90
+        },
+        {
+          "name": "shardscope/training_step/2",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 2,
+          "dur": 80
+        },
+        {
+          "name": "shardscope/forward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 3,
+          "dur": 10
+        },
+        {
+          "name": "shardscope/backward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 15,
+          "dur": 20
+        },
+        {
+          "name": "shardscope/optimizer",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 40,
+          "dur": 10
+        },
+        {
+          "name": "ProfilerStep#43",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 100,
+          "dur": 100
+        },
+        {
+          "name": "shardscope/step",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 101,
+          "dur": 90
+        },
+        {
+          "name": "shardscope/training_step/3",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 102,
+          "dur": 80
+        },
+        {
+          "name": "shardscope/forward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 103,
+          "dur": 10
+        },
+        {
+          "name": "shardscope/backward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 115,
+          "dur": 20
+        },
+        {
+          "name": "shardscope/optimizer",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 140,
+          "dur": 10
+        }
+      ]
+    },
+    "trace-00001.json": {
+      "synthetic": true,
+      "traceEvents": [
+        {
+          "name": "ProfilerStep#52",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 0,
+          "dur": 100
+        },
+        {
+          "name": "shardscope/step",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 1,
+          "dur": 90
+        },
+        {
+          "name": "shardscope/training_step/6",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 2,
+          "dur": 80
+        },
+        {
+          "name": "shardscope/forward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 3,
+          "dur": 10
+        },
+        {
+          "name": "shardscope/backward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 15,
+          "dur": 20
+        },
+        {
+          "name": "shardscope/optimizer",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 40,
+          "dur": 10
+        },
+        {
+          "name": "ProfilerStep#53",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 100,
+          "dur": 100
+        },
+        {
+          "name": "shardscope/step",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 101,
+          "dur": 90
+        },
+        {
+          "name": "shardscope/training_step/7",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 102,
+          "dur": 80
+        },
+        {
+          "name": "shardscope/forward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 103,
+          "dur": 10
+        },
+        {
+          "name": "shardscope/backward",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 115,
+          "dur": 20
+        },
+        {
+          "name": "shardscope/optimizer",
+          "ph": "X",
+          "cat": "user_annotation",
+          "pid": 1,
+          "tid": 1,
+          "ts": 140,
+          "dur": 10
+        }
+      ]
+    }
+  }
+}

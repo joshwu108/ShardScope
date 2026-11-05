@@ -3,9 +3,9 @@
 ``env`` captures reproducibility metadata, ``validate`` checks recorded run
 artifacts, and ``report`` renders HTML, JSON or CSV without adding measurements.
 
-``profile``, ``bench`` and ``compare`` expose their planned interfaces but exit
-with an explicit dependency message until their measurement contracts are
-implemented. Diagnostic and throughput measurements remain separate commands.
+``profile`` captures diagnostic traces; ``bench`` measures unprofiled windows
+and ``compare`` reports descriptive differences with significance unconfigured.
+Diagnostic and throughput measurements remain separate commands.
 Memory sweeps are outside the current command interface.
 """
 
@@ -15,14 +15,13 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from shardscope import __version__
 from shardscope.artifacts import load_run
 from shardscope.env import capture_environment
-from shardscope.errors import BlockedOnDecisionError, ShardScopeError, ValidationError
+from shardscope.errors import ShardScopeError, ValidationError
 from shardscope.report import (
     DEFAULT_MAX_ROWS,
     REPORT_FORMATS,
@@ -38,81 +37,8 @@ from shardscope.validate import validate_run
 EXIT_BROKEN_PIPE = 141
 
 
-@dataclass(frozen=True)
-class Option:
-    """One declared command-line option for a not-yet-implemented command."""
-
-    flag: str
-    metavar: str
-    help: str
-
-
-@dataclass(frozen=True)
-class PendingCommand:
-    """A command that exists as an interface target but cannot run yet.
-
-    ``blocked_on`` names the missing measurement contract or implementation
-    dependency so callers can distinguish unsupported behavior from a crash.
-    """
-
-    name: str
-    summary: str
-    blocked_on: str
-    options: tuple[Option, ...] = field(default_factory=tuple)
-
-    @property
-    def help(self) -> str:
-        return f"{self.summary} (not implemented)"
-
-    def message(self) -> str:
-        return f"'{self.name}' is not implemented yet. Blocked on: {self.blocked_on}"
-
-
-_CONFIG_OPTION = Option(
-    "--config", "FILE", "JSON run config; see shardscope.config for the validated keys"
-)
-
-PENDING_COMMANDS: tuple[PendingCommand, ...] = (
-    PendingCommand(
-        name="profile",
-        summary="bounded profiled diagnostic run",
-        blocked_on=(
-            "the capture contract in src/shardscope/capture.py -- profiler schedule, "
-            "activity selection and phase marker names remain undefined"
-        ),
-        options=(
-            _CONFIG_OPTION,
-            Option("--out", "DIR", "per-run artifact directory to create"),
-        ),
-    ),
-    PendingCommand(
-        name="bench",
-        summary="warm, never-profiled throughput run",
-        blocked_on=(
-            "the benchmark methodology in benchmarks/run_baseline.py -- warmup count, "
-            "repeat count and statistical significance criteria remain undefined"
-        ),
-        options=(
-            _CONFIG_OPTION,
-            Option("--out", "DIR", "unprofiled benchmark record to write"),
-        ),
-    ),
-    PendingCommand(
-        name="compare",
-        summary="before/after comparison of two unprofiled runs",
-        blocked_on=(
-            "the benchmark methodology used by 'bench': without a defined "
-            "variance test this command could only report a percentage it cannot "
-            "defend"
-        ),
-        options=(
-            Option("--baseline", "DIR", "unprofiled baseline run directory"),
-            Option("--candidate", "DIR", "unprofiled candidate run directory"),
-        ),
-    ),
-)
-
-_PENDING_BY_NAME = {command.name: command for command in PENDING_COMMANDS}
+# Retained as an empty compatibility export; all declared commands now execute.
+PENDING_COMMANDS: tuple = ()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -205,17 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    for command in PENDING_COMMANDS:
-        # Options are declared but optional: the command cannot run either
-        # way, so demanding its arguments would only obscure the real reason
-        # it refuses.
-        pending = sub.add_parser(
-            command.name,
-            help=command.help,
-            description=f"{command.summary}. NOT IMPLEMENTED. {command.blocked_on}.",
-        )
-        for option in command.options:
-            pending.add_argument(option.flag, metavar=option.metavar, help=option.help)
+    profile = sub.add_parser("profile", help="bounded profiled diagnostic run")
+    profile.add_argument("--config", type=Path, required=True)
+    profile.add_argument("--out", type=Path, required=True)
+
+    bench = sub.add_parser("bench", help="unprofiled completed-work benchmark")
+    bench.add_argument("--config", type=Path, required=True)
+    bench.add_argument("--out", type=Path, required=True)
+    bench.add_argument("--warmup", type=int, required=True)
+    bench.add_argument("--repeat", type=int, required=True)
+    bench.add_argument("--measured-steps", type=int, required=True)
+    compare = sub.add_parser("compare", help="descriptive benchmark comparison")
+    compare.add_argument("--baseline", type=Path, required=True)
+    compare.add_argument("--candidate", type=Path, required=True)
 
     return parser
 
@@ -255,7 +183,47 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "report":
         return _run_report(args)
 
-    raise BlockedOnDecisionError(_PENDING_BY_NAME[args.command].message())
+    if args.command == "profile":
+        from shardscope.capture import profile_run
+        from shardscope.config import load_run_config
+
+        try:
+            profile_run(load_run_config(args.config), args.out, config_file=str(args.config))
+        except (OSError, RuntimeError) as exc:
+            raise ShardScopeError(f"capture failed: {exc}. This run is not recorded.") from exc
+        print(f"wrote {args.out}")
+        return 0
+
+    if args.command == "bench":
+        from shardscope.benchmark import BenchmarkSettings, benchmark_run
+        from shardscope.config import load_run_config
+
+        try:
+            benchmark_run(
+                load_run_config(args.config),
+                BenchmarkSettings(args.warmup, args.repeat, args.measured_steps),
+                args.out,
+                config_file=str(args.config),
+            )
+        except (OSError, RuntimeError) as exc:
+            raise ShardScopeError(f"benchmark failed: {exc}") from exc
+        print(f"wrote {args.out / 'benchmark.json'}")
+        return 0
+
+    if args.command == "compare":
+        import json
+
+        from shardscope.benchmark import compare_benchmarks, load_benchmark
+
+        print(
+            json.dumps(
+                compare_benchmarks(load_benchmark(args.baseline), load_benchmark(args.candidate)),
+                indent=2,
+            )
+        )
+        return 0
+
+    raise ShardScopeError(f"unknown command: {args.command}")
 
 
 def _run_validate(args: argparse.Namespace) -> int:

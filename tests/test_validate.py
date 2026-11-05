@@ -279,9 +279,8 @@ class TestValidateCommand:
         assert _snapshot(run_dir) == before
         assert set(tmp_path.iterdir()) == outside
 
-    def test_validate_is_implemented_and_the_pending_commands_still_refuse(self):
-        assert "validate" not in [command.name for command in PENDING_COMMANDS]
-        assert [command.name for command in PENDING_COMMANDS] == ["profile", "bench", "compare"]
+    def test_validate_and_execution_commands_are_implemented(self):
+        assert PENDING_COMMANDS == ()
 
     def test_help_does_not_describe_validate_as_unimplemented(self, capsys):
         with pytest.raises(SystemExit):

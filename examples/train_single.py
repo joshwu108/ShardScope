@@ -15,118 +15,56 @@ the device. Moving it into the timed region would change ``--no-sync`` semantics
 from __future__ import annotations
 
 import argparse
-import csv
-import io
 import json
-import math
 import os
 import sys
-import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
-from torch import nn
 
-NUM_CLASSES = 10
-IMAGE_SIZE = 28
-DEFAULT_SAMPLES = 2048
-DEFAULT_BATCH_SIZE = 64
-DEFAULT_STEPS = 100
-DEFAULT_LEARNING_RATE = 0.01
-
-DATA_RESIDENCY_CHOICES = ("host", "device")
-DEVICE_CHOICES = ("auto", "cpu", "mps", "cuda")
-
-STEP_CSV_COLUMNS = (
-    "step",
-    "loss",
-    "step_time_ms",
-    "data_residency",
-    "synchronized",
+from shardscope import execution
+from shardscope.execution import (
+    DATA_RESIDENCY_CHOICES,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_SAMPLES,
+    DEFAULT_STEPS,
+    DEVICE_CHOICES,
+    _mps_is_usable,
+    step_csv_text,
+    summarize,
+)
+from shardscope.execution import (
+    IMAGE_SIZE as IMAGE_SIZE,
+)
+from shardscope.execution import (
+    NUM_CLASSES as NUM_CLASSES,
+)
+from shardscope.execution import (
+    STEP_CSV_COLUMNS as STEP_CSV_COLUMNS,
+)
+from shardscope.execution import (
+    StepRecord as StepRecord,
+)
+from shardscope.execution import (
+    _batch_index_schedule as _batch_index_schedule,
+)
+from shardscope.execution import (
+    build_model as build_model,
+)
+from shardscope.execution import (
+    make_synthetic_dataset as make_synthetic_dataset,
+)
+from shardscope.execution import (
+    write_step_csv as write_step_csv,
 )
 
 
-@dataclass(frozen=True)
-class StepRecord:
-    """One training iteration's measurement.
-
-    ``data_residency`` and ``synchronized`` travel with the number because a
-    step time is only comparable against another step time measured the same
-    way.
-    """
-
-    step: int
-    loss: float
-    step_time_ms: float
-    data_residency: str
-    synchronized: bool
-
-
-def make_synthetic_dataset(
-    n_samples: int,
-    seed: int,
-    *,
-    image_size: int = IMAGE_SIZE,
-    num_classes: int = NUM_CLASSES,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(images, labels)`` drawn from a seed-local generator.
-
-    Synthetic input exercises the training path without an accuracy target.
-    Shape, dtype and reproducibility determine fixture behavior.
-    """
-    if n_samples <= 0:
-        raise ValueError(f"n_samples must be positive, got {n_samples}")
-
-    generator = torch.Generator().manual_seed(seed)
-    images = torch.randn(
-        n_samples, 1, image_size, image_size, generator=generator, dtype=torch.float32
-    )
-    labels = torch.randint(0, num_classes, (n_samples,), generator=generator, dtype=torch.int64)
-    return images, labels
-
-
-def build_model(*, seed: int, num_classes: int = NUM_CLASSES) -> nn.Module:
-    """Build the small CNN, initialized deterministically for ``seed``.
-
-    ``fork_rng`` keeps the initialization from consuming global randomness.
-    """
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        return nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Flatten(),
-            nn.Linear(16 * 7 * 7, num_classes),
-        )
-
-
-def _mps_is_usable() -> bool:
-    backend = getattr(torch.backends, "mps", None)
-    if backend is None:
-        return False
-    try:
-        return bool(backend.is_available())
-    except Exception:  # pragma: no cover - platform-specific
-        return False
-
-
-def resolve_device(request: str) -> torch.device:
-    """Turn a device request into a concrete device, falling back honestly."""
-    if request not in DEVICE_CHOICES:
-        raise ValueError(f"unknown device {request!r}; choose from {DEVICE_CHOICES}")
+def resolve_device(request):
     if request == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if _mps_is_usable():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(request)
+        request = "cuda" if torch.cuda.is_available() else "mps" if _mps_is_usable() else "cpu"
+    return execution.resolve_device(request)
 
 
 def _synchronize(device: torch.device) -> None:
@@ -358,8 +296,7 @@ def _resolve_config(args):
 
 
 def out_dir_problem(out_dir: Path) -> str | None:
-    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r.
-    """
+    """Say why ``out_dir`` cannot receive a run's artifacts, or return ``None``.r."""
     if out_dir.exists() and not out_dir.is_dir():
         return (
             f"--out-dir {out_dir} exists and is not a directory. Point it at a new "
@@ -377,8 +314,7 @@ def out_dir_problem(out_dir: Path) -> str | None:
 
 
 def _write_run_artifacts(out_dir: Path, args, config, records, stats, device) -> None:
-    """Write the artifact triple, each file landing whole or not at all.
-    """
+    """Write the artifact triple, each file landing whole or not at all."""
     from shardscope.artifacts import replace_file_contents
     from shardscope.env import capture_environment
 
