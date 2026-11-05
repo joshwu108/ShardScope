@@ -66,15 +66,7 @@ class RunEnvironment:
 
 
 def distributed_capable(*, cuda_available: bool, device_count: int) -> bool:
-    """Whether a host with this CUDA inventory could run a real DDP job.
-
-    Kept as a free function so a *recorded* environment -- an
-    ``environment.json`` loaded back from a finished run -- is judged by the
-    same rule as the live machine, instead of each caller re-spelling
-    ">= 2 devices". A report that disagreed with ``shardscope env`` about
-    what a host can do is exactly how a distributed claim gets made for a
-    run that never happened.
-    """
+    """Whether a host with this CUDA inventory could run a real DDP job."""
     return bool(cuda_available) and device_count >= 2
 
 

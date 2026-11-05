@@ -1,34 +1,4 @@
-"""Check that a run directory is a recording that can be reported.
-
-``shardscope validate --run DIR`` is the artifact reader exposed on its own:
-it loads the directory exactly as ``report`` does and says whether that
-worked, what the run contains, and what it does not. It renders nothing,
-writes nothing and never touches the directory it reads.
-
-It accepts what ``report`` accepts, with one deliberate difference. A step
-count that disagrees between ``summary.json`` and ``steps.csv`` is *shown*
-by a report, because a report describes what is on disk; here it is a
-failure, because the question being answered is "can this directory be
-trusted as a recording of one run", and two artifacts that describe
-different runs mean it cannot. Neither number is adjusted either way.
-
-Two kinds of finding, kept apart on purpose:
-
-``errors``
-    the directory cannot be vouched for -- it did not load, or its
-    artifacts disagree. Exit 2. There is at most one, because loading stops
-    at the first defect.
-``warnings``
-    the directory loaded and can be reported, but something a reader would
-    want to know is missing or mixed: no readable recorded step count, an
-    unrecorded profiling status, rows measured under different policies.
-    Exit 0. A warning is never promoted to a default value.
-
-The result also carries the per-field availability statuses from
-:mod:`shardscope.availability`, so automation can see which report fields
-this run records without rendering a report. It carries no statistic: a
-validation result that quoted a median would be a report by another name.
-"""
+"""Check that a run directory is a recording that can be reported."""
 
 from __future__ import annotations
 
@@ -72,6 +42,7 @@ class ValidationResult:
     summary_steps: int | None
     artifact_names: tuple[str, ...]
     availability: tuple[FieldStatus, ...]
+    analysis_present: bool = False
 
     @property
     def summary_agrees_with_rows(self) -> bool | None:
@@ -106,6 +77,10 @@ class ValidationResult:
             "profiled": self.profiled,
             "artifact_names": list(self.artifact_names),
             "availability": [status.to_dict() for status in self.availability],
+            "analysis": {
+                "present": self.analysis_present,
+                "validated": self.analysis_present and self.ok,
+            },
         }
 
     def to_json(self) -> str:
@@ -164,6 +139,7 @@ def validate_run(path: str | Path) -> ValidationResult:
     """
     try:
         run = load_run(path)
+        availability = field_statuses(run)
     except ArtifactError as exc:
         return ValidationResult(
             path=str(path),
@@ -179,6 +155,7 @@ def validate_run(path: str | Path) -> ValidationResult:
             summary_steps=None,
             artifact_names=(),
             availability=(),
+            analysis_present=(Path(path) / "analysis.json").exists(),
         )
 
     errors: list[str] = []
@@ -199,6 +176,9 @@ def validate_run(path: str | Path) -> ValidationResult:
             "describe this run; neither is adjusted. Treat the directory as unrecorded and "
             "repeat the run."
         )
+
+    if run.analysis is not None:
+        warnings.extend(run.analysis["warnings"])
 
     if run.profiled is None:
         warnings.append(
@@ -234,7 +214,8 @@ def validate_run(path: str | Path) -> ValidationResult:
         summary_present=run.summary is not None,
         summary_steps=recorded,
         artifact_names=run.artifact_names,
-        availability=field_statuses(run),
+        availability=availability,
+        analysis_present=run.analysis is not None,
     )
 
 

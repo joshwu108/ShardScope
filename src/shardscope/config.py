@@ -29,23 +29,10 @@ __all__ = [
     "load_run_config",
 ]
 
-#: Accepted ``device`` values. Mirrors examples/train_single.py; ``auto``
-#: resolves to cuda, then mps, then cpu.
 DEVICE_CHOICES = ("auto", "cpu", "mps", "cuda")
-
-#: Supported batch-placement strategies.
 DATA_RESIDENCY_CHOICES = ("host", "device")
-
-#: The seeds the fixture's generators accept. ``torch.Generator.manual_seed``
-#: takes a 64-bit value in ``[-2**63, 2**64 - 1]``, and the fixture derives
-#: ``seed + 1`` for its batch schedule, so the top of the range is one lower.
-#: A seed outside it used to surface as a ``ValueError`` traceback from inside
-#: torch after the config had been accepted.
 SEED_MIN = -(2**63)
 SEED_MAX = 2**64 - 2
-
-#: Keys beginning with this prefix are ignored, so a config can carry notes.
-#: Same convention as .shardscope-commit-auth.json's ``_comment``.
 _COMMENT_PREFIX = "_"
 
 
