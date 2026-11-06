@@ -266,6 +266,16 @@ Each per-step measurement has ``value_ms``, ``status``, ``basis``, ``scope``,
 timings are interval unions of complete host ranges (``basis: host_range``).
 Device metrics are reported as unavailable.
 
+A CUDA capture also contains device-side copies of the markers: Kineto emits
+them with category ``gpu_user_annotation`` on a GPU stream. Analysis
+classifies them by that category alone, keeps them raw, and never measures
+them as host phases or attributes them to a step. A mapping that names one,
+or that disagrees with the ``shardscope/training_step/<N>`` identity marker
+nested in its boundary, fails analysis. Metadata, flow, and instant events are
+retained unmeasured; ``warnings`` summarizes each such class once per trace
+with a count and representative original event indices rather than one line
+per event.
+
 The ``host_loader_wait`` rule marks a step ``possible_input_wait`` when
 ``host_data_wait_ms`` meets the threshold, ``below_threshold`` when it does
 not, and ``unavailable`` when the step has no recorded wait. A host wait

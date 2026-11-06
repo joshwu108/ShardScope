@@ -349,8 +349,15 @@ def _analysis_section(run: RunArtifacts) -> str:
         comparison = {"inputs": finding["inputs"], "comparison": finding["comparison"]}
         lines.append(f"<pre>{_esc(json.dumps(comparison, indent=2))}</pre>")
         lines.append(f"<p>{evidence_links(finding['evidence'])}</p>")
-    lines.append("<h2>Analysis warnings</h2><ul>")
-    lines.extend(f"<li>{_esc(warning)}</li>" for warning in analysis["warnings"])
+    warnings = analysis["warnings"]
+    lines.append(f"<h2>Analysis warnings ({len(warnings)})</h2>")
+    lines.append(
+        '<p class="sub">As persisted in analysis.json. Repetitive retained-but-unmeasured '
+        "event forms are summarized per trace with representative original event indices; "
+        "the raw events remain in the source traces.</p>"
+    )
+    lines.append("<ul>")
+    lines.extend(f"<li>{_esc(warning)}</li>" for warning in warnings)
     lines.append("</ul><h2>Analysis evidence</h2><ul>")
     for (name, index), anchor in refs.items():
         source = str((run.path / name).resolve())

@@ -1,0 +1,680 @@
+{
+ "synthetic": true,
+ "description": "Hand-written trace that reproduces the structure of a torch.profiler CUDA capture (Kineto schemaVersion 1): top-level metadata, 'M' metadata events, s/f flow events (ac2g, fwdbwd), 'i' instants with string pid/tid, host user_annotation markers nested ProfilerStep#N > shardscope/step > shardscope/training_step/N > phases, and device-side gpu_user_annotation copies of the same names on a GPU stream. Timings are invented; nothing here is a hardware measurement.",
+ "environment": {
+  "cuda_available": true,
+  "cuda_version": "13.2",
+  "cudnn_version": 92600,
+  "device_count": 1,
+  "device_names": [
+   "synthetic-device"
+  ],
+  "nccl_version": null
+ },
+ "environment_extra": {
+  "artifact_schema": 1,
+  "profiled": true,
+  "rank": 0,
+  "local_rank": 0,
+  "world_size": 1,
+  "hostname": "synthetic-host",
+  "pid": 4242,
+  "source": "shardscope.capture",
+  "capture": {
+   "wait": 2,
+   "warmup": 2,
+   "active": 2,
+   "repeat": 1,
+   "activities": [
+    "cpu",
+    "cuda"
+   ],
+   "record_shapes": false,
+   "profile_memory": false,
+   "with_stack": false,
+   "with_flops": false,
+   "device_resolved": "cuda:0",
+   "data_wait": "recorded: synthetic delayed iterator",
+   "step_map_schema": 1,
+   "trace_files": [
+    "trace-00000.json"
+   ],
+   "step_map": [
+    {
+     "rank": 0,
+     "training_step": 4,
+     "trace_file": "trace-00000.json",
+     "step_event_index": 8,
+     "identity_event_index": 9,
+     "profiler_step_event_index": 7,
+     "profiler_step_name": "ProfilerStep#4"
+    },
+    {
+     "rank": 0,
+     "training_step": 5,
+     "trace_file": "trace-00000.json",
+     "step_event_index": 30,
+     "identity_event_index": 31,
+     "profiler_step_event_index": 29,
+     "profiler_step_name": "ProfilerStep#5"
+    }
+   ]
+  }
+ },
+ "trace": {
+  "schemaVersion": 1,
+  "deviceProperties": [
+   {
+    "id": 0,
+    "name": "synthetic-device",
+    "computeMajor": 8,
+    "computeMinor": 0
+   }
+  ],
+  "trace_id": "SYNTHETIC0000000000000000000000",
+  "cuda_driver_version": 13000,
+  "cuda_runtime_version": 13020,
+  "cupti_version": 130202,
+  "host_name": "synthetic-host",
+  "displayTimeUnit": "ms",
+  "baseTimeNanoseconds": 1700000000000000000,
+  "traceName": "trace-00000.json",
+  "traceEvents": [
+   {
+    "ph": "M",
+    "name": "process_name",
+    "ts": 0,
+    "pid": 4242,
+    "tid": 0,
+    "args": {
+     "name": "python"
+    }
+   },
+   {
+    "ph": "M",
+    "name": "process_labels",
+    "ts": 0,
+    "pid": 4242,
+    "tid": 0,
+    "args": {
+     "labels": "CPU"
+    }
+   },
+   {
+    "ph": "M",
+    "name": "thread_name",
+    "ts": 0,
+    "pid": 4242,
+    "tid": 4242,
+    "args": {
+     "name": "thread 4242 (python)"
+    }
+   },
+   {
+    "ph": "M",
+    "name": "process_name",
+    "ts": 0,
+    "pid": 0,
+    "tid": 0,
+    "args": {
+     "name": "python"
+    }
+   },
+   {
+    "ph": "M",
+    "name": "process_labels",
+    "ts": 0,
+    "pid": 0,
+    "tid": 0,
+    "args": {
+     "labels": "GPU 0"
+    }
+   },
+   {
+    "ph": "M",
+    "name": "thread_name",
+    "ts": 0,
+    "pid": 0,
+    "tid": 7,
+    "args": {
+     "name": "stream 7"
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "Trace",
+    "name": "PyTorch Profiler (0)",
+    "pid": "Spans",
+    "tid": "PyTorch Profiler",
+    "ts": 0,
+    "dur": 2000,
+    "args": {
+     "Op count": 0
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "ProfilerStep#4",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 100,
+    "dur": 900,
+    "args": {
+     "External id": 1,
+     "Record function id": 0,
+     "Ev Idx": 1
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/step",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 110,
+    "dur": 880,
+    "args": {
+     "External id": 2,
+     "Record function id": 0,
+     "Ev Idx": 2
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/training_step/4",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 115,
+    "dur": 870,
+    "args": {
+     "External id": 3,
+     "Record function id": 0,
+     "Ev Idx": 3
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/data_wait",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 120,
+    "dur": 50,
+    "args": {
+     "External id": 4,
+     "Record function id": 0,
+     "Ev Idx": 4
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/h2d",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 180,
+    "dur": 100,
+    "args": {
+     "External id": 5,
+     "Record function id": 0,
+     "Ev Idx": 5
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "aten::to",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 185,
+    "dur": 90,
+    "args": {
+     "External id": 9,
+     "Record function id": 0,
+     "Ev Idx": 9
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "cuda_runtime",
+    "name": "cudaMemcpyAsync",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 200,
+    "dur": 20,
+    "args": {
+     "External id": 9,
+     "Record function id": 0,
+     "Ev Idx": 9,
+     "cbid": 41,
+     "correlation": 101
+    }
+   },
+   {
+    "ph": "s",
+    "id": 101,
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 200,
+    "cat": "ac2g",
+    "name": "ac2g"
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_memcpy",
+    "name": "Memcpy HtoD (Pageable -> Device)",
+    "pid": 0,
+    "tid": 7,
+    "ts": 260,
+    "dur": 30,
+    "args": {
+     "External id": 9,
+     "stream": 7,
+     "correlation": 101,
+     "bytes": 200704
+    }
+   },
+   {
+    "ph": "f",
+    "id": 101,
+    "pid": 0,
+    "tid": 7,
+    "ts": 260,
+    "cat": "ac2g",
+    "name": "ac2g",
+    "bp": "e"
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/forward",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 300,
+    "dur": 200,
+    "args": {
+     "External id": 20,
+     "Record function id": 0,
+     "Ev Idx": 20
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "aten::conv2d",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 310,
+    "dur": 150,
+    "args": {
+     "External id": 21,
+     "Record function id": 0,
+     "Ev Idx": 21,
+     "Sequence number": 0,
+     "Fwd thread id": 0
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "cuda_runtime",
+    "name": "cudaLaunchKernel",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 400,
+    "dur": 10,
+    "args": {
+     "External id": 21,
+     "Record function id": 0,
+     "Ev Idx": 21,
+     "cbid": 211,
+     "correlation": 102
+    }
+   },
+   {
+    "ph": "s",
+    "id": 102,
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 400,
+    "cat": "ac2g",
+    "name": "ac2g"
+   },
+   {
+    "ph": "X",
+    "cat": "kernel",
+    "name": "void conv_kernel<float>(float const*, float*)",
+    "pid": 0,
+    "tid": 7,
+    "ts": 500,
+    "dur": 120,
+    "args": {
+     "External id": 21,
+     "stream": 7,
+     "correlation": 102,
+     "grid": [
+      1,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1,
+      1
+     ]
+    }
+   },
+   {
+    "ph": "f",
+    "id": 102,
+    "pid": 0,
+    "tid": 7,
+    "ts": 500,
+    "cat": "ac2g",
+    "name": "ac2g",
+    "bp": "e"
+   },
+   {
+    "ph": "s",
+    "id": 1,
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 450,
+    "cat": "fwdbwd",
+    "name": "fwdbwd"
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/backward",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 520,
+    "dur": 250,
+    "args": {
+     "External id": 30,
+     "Record function id": 0,
+     "Ev Idx": 30
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "autograd::engine::evaluate_function: ConvolutionBackward0",
+    "pid": 4242,
+    "tid": 4300,
+    "ts": 540,
+    "dur": 100,
+    "args": {
+     "External id": 31,
+     "Record function id": 0,
+     "Ev Idx": 31,
+     "Sequence number": 0
+    }
+   },
+   {
+    "ph": "f",
+    "id": 1,
+    "pid": 4242,
+    "tid": 4300,
+    "ts": 540,
+    "cat": "fwdbwd",
+    "name": "fwdbwd",
+    "bp": "e"
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/optimizer",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 800,
+    "dur": 150,
+    "args": {
+     "External id": 35,
+     "Record function id": 0,
+     "Ev Idx": 35
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_memset",
+    "name": "Memset (Device)",
+    "pid": 0,
+    "tid": 7,
+    "ts": 830,
+    "dur": 5,
+    "args": {
+     "External id": 35,
+     "stream": 7,
+     "correlation": 103
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "ProfilerStep#5",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1000,
+    "dur": 900,
+    "args": {
+     "External id": 50,
+     "Record function id": 0,
+     "Ev Idx": 50
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/step",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1010,
+    "dur": 880,
+    "args": {
+     "External id": 51,
+     "Record function id": 0,
+     "Ev Idx": 51
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/training_step/5",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1015,
+    "dur": 870,
+    "args": {
+     "External id": 52,
+     "Record function id": 0,
+     "Ev Idx": 52
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/data_wait",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1020,
+    "dur": 60,
+    "args": {
+     "External id": 53,
+     "Record function id": 0,
+     "Ev Idx": 53
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/h2d",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1080,
+    "dur": 100,
+    "args": {
+     "External id": 54,
+     "Record function id": 0,
+     "Ev Idx": 54
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/forward",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1200,
+    "dur": 200,
+    "args": {
+     "External id": 60,
+     "Record function id": 0,
+     "Ev Idx": 60
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/backward",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1420,
+    "dur": 250,
+    "args": {
+     "External id": 70,
+     "Record function id": 0,
+     "Ev Idx": 70
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "user_annotation",
+    "name": "shardscope/optimizer",
+    "pid": 4242,
+    "tid": 4242,
+    "ts": 1700,
+    "dur": 150,
+    "args": {
+     "External id": 75,
+     "Record function id": 0,
+     "Ev Idx": 75
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "ProfilerStep#5",
+    "pid": 0,
+    "tid": 7,
+    "ts": 1250,
+    "dur": 600,
+    "args": {
+     "External id": 50
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "shardscope/backward",
+    "pid": 0,
+    "tid": 7,
+    "ts": 1600,
+    "dur": 3,
+    "args": {
+     "External id": 70
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "shardscope/forward",
+    "pid": 0,
+    "tid": 7,
+    "ts": 1500,
+    "dur": 90,
+    "args": {
+     "External id": 60
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "shardscope/h2d",
+    "pid": 0,
+    "tid": 7,
+    "ts": 1160,
+    "dur": 25,
+    "args": {
+     "External id": 54
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "ProfilerStep#4",
+    "pid": 0,
+    "tid": 7,
+    "ts": 260,
+    "dur": 600,
+    "args": {
+     "External id": 1
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "shardscope/forward",
+    "pid": 0,
+    "tid": 7,
+    "ts": 500,
+    "dur": 120,
+    "args": {
+     "External id": 20
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "shardscope/backward",
+    "pid": 0,
+    "tid": 7,
+    "ts": 700,
+    "dur": 3,
+    "args": {
+     "External id": 30
+    }
+   },
+   {
+    "ph": "X",
+    "cat": "gpu_user_annotation",
+    "name": "shardscope/h2d",
+    "pid": 0,
+    "tid": 7,
+    "ts": 260,
+    "dur": 30,
+    "args": {
+     "External id": 5
+    }
+   },
+   {
+    "ph": "i",
+    "s": "g",
+    "name": "Iteration Start: PyTorch Profiler",
+    "pid": "Traces",
+    "tid": "Trace PyTorch Profiler",
+    "ts": 0
+   },
+   {
+    "ph": "i",
+    "s": "g",
+    "name": "Record Window End",
+    "pid": "",
+    "tid": "",
+    "ts": 2000
+   }
+  ]
+ }
+}

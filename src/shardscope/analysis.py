@@ -24,6 +24,9 @@ from shardscope.parse import (
     StepMapping,
     analyze_traces,
     finite_number,
+    identity_step,
+    is_device_annotation,
+    is_step_boundary,
     measurement,
     parse_trace,
     read_json_bytes,
@@ -381,17 +384,20 @@ def validate_analysis(
         boundary = reference(boundary_ref) if boundary_ref is not None else None
         if boundary is not None:
             _require(
-                boundary["ph"] == "X"
-                and (
-                    boundary.get("name") == "shardscope/step"
-                    or boundary.get("name", "").startswith("ProfilerStep#")
-                ),
-                "boundary is not complete step marker",
+                is_step_boundary(boundary),
+                "boundary is not complete host step marker"
+                + (" (device annotation)" if is_device_annotation(boundary) else ""),
             )
         if mapped is not None:
             _require(
                 boundary_ref == mapped.get(step),
                 f"training_step {step}: boundary disagrees with explicit step map",
+            )
+        if boundary is not None and directory is not None:
+            identity = identity_step(traces[boundary_ref["file"]], boundary_ref["event_index"])
+            _require(
+                identity is None or identity == step,
+                f"training_step {step}: boundary's identity marker names step {identity}",
             )
         metrics = row.get("measurements")
         _require(isinstance(metrics, dict), "measurements must be object")
@@ -434,7 +440,9 @@ def validate_analysis(
                         if event is None:
                             continue
                         _require(
-                            event["ph"] == "X" and event.get("name") == marker,
+                            event["ph"] == "X"
+                            and event.get("name") == marker
+                            and not is_device_annotation(event),
                             f"{name}: evidence is not the expected complete host marker",
                         )
                         _require(

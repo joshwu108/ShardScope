@@ -3,6 +3,12 @@
 Chrome timestamps and durations are microseconds; displayTimeUnit only controls
 viewer formatting. Unknown events and metadata remain intact. Reading a trace
 neither assigns a rank nor establishes asynchronous device ownership.
+
+Warnings describe what was retained without being measured. Repetitive
+informational forms (metadata, flow and instant events; device-side copies of
+host markers) are summarized once per trace with representative original
+indices, so a malformed host marker or a mapping problem is not buried among
+hundreds of identical lines.
 """
 
 from __future__ import annotations
@@ -33,6 +39,50 @@ class Trace:
         if type(index) is not int or not 0 <= index < len(self.events):
             raise ArtifactError(f"{self.path}: event_index {index!r} is out of range")
         return {"file": self.path.name, "event_index": index}
+
+
+#: Kineto's category for the device-side mirror of a ``record_function`` range.
+#: The same ``shardscope/*`` names appear on a GPU stream (pid 0, tid = stream)
+#: with device timestamps; they are not host phase markers.
+DEVICE_ANNOTATION_CATEGORY = "gpu_user_annotation"
+
+#: Human labels for Chrome event forms that carry no measurable host range.
+_FORM_LABELS = {
+    "M": "metadata",
+    "s": "flow-start",
+    "t": "flow-step",
+    "f": "flow-end",
+    "i": "instant",
+    "I": "instant",
+    "B": "duration-begin",
+    "E": "duration-end",
+    "b": "async-begin",
+    "n": "async-instant",
+    "e": "async-end",
+    "C": "counter",
+}
+
+#: Representative original indices quoted in an aggregated warning.
+INDEX_SAMPLE = 5
+
+
+def is_device_annotation(event: dict[str, Any]) -> bool:
+    """True for a Kineto GPU-side user annotation; classified by category only.
+
+    Nothing is inferred from the name, the pid/tid or timestamp containment:
+    a device annotation is one the producer labelled as such.
+    """
+    return event.get("cat") == DEVICE_ANNOTATION_CATEGORY
+
+
+def summarize_indices(indices, *, limit: int = INDEX_SAMPLE) -> str:
+    """Spell a count plus up to ``limit`` representative original event indices."""
+    indices = list(indices)
+    shown = ", ".join(f"event[{index}]" for index in indices[:limit])
+    rest = len(indices) - min(len(indices), limit)
+    if rest:
+        shown += f", ... {rest} more"
+    return f"{len(indices)} event(s): {shown}"
 
 
 def finite_number(value: Any) -> bool:
@@ -83,6 +133,7 @@ def parse_trace(path: str | Path) -> Trace:
     warnings = []
     stacks: dict[tuple[Any, Any], list[tuple[int, dict]]] = {}
     last_range_time = {}
+    retained: dict[str, list[int]] = {}
     for index, event in enumerate(payload):
         where = f"{target} event[{index}]"
         if not isinstance(event, dict) or not isinstance(event.get("ph"), str) or not event["ph"]:
@@ -128,10 +179,16 @@ def parse_trace(path: str | Path) -> Trace:
                     if "name" in event and event["name"] != begin["name"]:
                         raise ArtifactError(f"{where}: mismatched B/E range name")
         if phase != "X":
-            warnings.append(f"event[{index}]: {phase!r} form retained; unsupported for host timing")
+            retained.setdefault(phase, []).append(index)
     for stack in stacks.values():
         if stack:
             raise ArtifactError(f"{target} event[{stack[-1][0]}]: unclosed B/E range")
+    for phase, indices in retained.items():
+        label = _FORM_LABELS.get(phase, "unknown-form")
+        warnings.append(
+            f"{label} ({phase!r}) events retained raw; unsupported for host timing: "
+            + summarize_indices(indices)
+        )
     if not payload:
         warnings.append("empty trace: no events recorded")
     return Trace(target, tuple(payload), metadata, hashlib.sha256(raw).hexdigest(), tuple(warnings))
@@ -180,6 +237,66 @@ def interval_union_us(intervals) -> float:
     if not finite_number(total):
         raise ArtifactError("interval union overflow")
     return total
+
+
+IDENTITY_PREFIX = "shardscope/training_step/"
+STEP_MARKER = "shardscope/step"
+PROFILER_STEP_PREFIX = "ProfilerStep#"
+
+
+def is_step_boundary(event: dict[str, Any]) -> bool:
+    """A complete host step marker: the only event form a step map may name."""
+    name = event.get("name", "")
+    return (
+        event.get("ph") == "X"
+        and not is_device_annotation(event)
+        and (name == STEP_MARKER or name.startswith(PROFILER_STEP_PREFIX))
+    )
+
+
+def _contains(boundary: dict[str, Any], event: dict[str, Any]) -> bool:
+    """Same host thread and the whole range inside the boundary; no slack."""
+    return (
+        event["pid"] == boundary["pid"]
+        and event["tid"] == boundary["tid"]
+        and boundary["ts"] <= event["ts"]
+        and event["ts"] + event["dur"] <= boundary["ts"] + boundary["dur"]
+    )
+
+
+def identity_step(trace: Trace, boundary_index: int) -> int | None:
+    """The training step named by the identity marker nested in a boundary.
+
+    The capture producer nests ``shardscope/training_step/<N>`` inside each
+    ``shardscope/step``; a mapping that disagrees with that marker is a
+    mapping problem, not a measurement. Returns ``None`` when the boundary
+    holds no identity marker, so a trace without identity markers is still
+    analyzable from its explicit map alone. A malformed or ambiguous identity
+    is an error rather than a guess.
+    """
+    boundary = trace.events[boundary_index]
+    found: dict[int, int] = {}
+    for index, event in enumerate(trace.events):
+        name = event.get("name", "")
+        if (
+            event.get("ph") != "X"
+            or not name.startswith(IDENTITY_PREFIX)
+            or is_device_annotation(event)
+            or not _contains(boundary, event)
+        ):
+            continue
+        suffix = name[len(IDENTITY_PREFIX) :]
+        if not suffix.isdigit():
+            raise ArtifactError(
+                f"{trace.path.name} event[{index}]: malformed identity marker {name!r}"
+            )
+        found.setdefault(int(suffix), index)
+    if len(found) > 1:
+        raise ArtifactError(
+            f"{trace.path.name} event[{boundary_index}]: boundary contains identity markers "
+            f"for several training steps: {sorted(found)}"
+        )
+    return next(iter(found), None)
 
 
 def measurement(value, *, basis=None, reason="", evidence=(), status=None, scope="") -> dict:
@@ -234,59 +351,71 @@ def analyze_traces(
             raise ArtifactError(f"step map names unknown trace {mapping.trace_file!r}")
         trace.reference(mapping.event_index)
         event = trace.events[mapping.event_index]
-        name = event.get("name", "")
-        if event["ph"] != "X" or not (
-            name == "shardscope/step" or name.startswith("ProfilerStep#")
-        ):
-            raise ArtifactError(
-                f"{mapping.trace_file} event[{mapping.event_index}]: map needs complete step marker"
+        if not is_step_boundary(event):
+            kind = (
+                f"device annotation ({DEVICE_ANNOTATION_CATEGORY})"
+                if is_device_annotation(event)
+                else "not a complete step marker"
             )
-        boundaries.append((mapping, trace, event))
+            raise ArtifactError(
+                f"{mapping.trace_file} event[{mapping.event_index}]: map needs complete host "
+                f"step marker; {kind}"
+            )
+        identity = identity_step(trace, mapping.event_index)
+        if identity is not None and identity != mapping.training_step:
+            raise ArtifactError(
+                f"{mapping.trace_file} event[{mapping.event_index}]: identity marker names "
+                f"training step {identity} but the map says {mapping.training_step}"
+            )
+        boundaries.append((mapping, trace, event, identity))
+
+    # Classify every host-marker-named event once per trace. Each event keeps
+    # its original index; nothing is filtered out of the trace itself.
+    classified: dict[str, dict[str, Any]] = {}
+    for trace in traces:
+        device: dict[str, list[int]] = {}
+        unsupported: dict[str, list[tuple[int, str]]] = {}
+        host: list[tuple[int, dict, list]] = []
+        local = [b for b in boundaries if b[1] is trace]
+        for index, event in enumerate(trace.events):
+            marker = event.get("name")
+            if marker not in HOST_PHASES:
+                continue
+            if is_device_annotation(event):
+                device.setdefault(marker, []).append(index)
+            elif event["ph"] != "X":
+                unsupported.setdefault(marker, []).append((index, event["ph"]))
+            else:
+                owners = [m for m, _, b, _ in local if _contains(b, event)]
+                host.append((index, event, owners))
+        classified[trace.path.name] = {"device": device, "unsupported": unsupported, "host": host}
+
     rows = []
-    assigned = set()
-    for mapping, trace, boundary in boundaries:
+    for mapping, trace, boundary, _identity in boundaries:
         metrics = {}
         scope = (
             f"rank={rank}; trace={trace.path.name}; pid={boundary['pid']}; tid={boundary['tid']}"
         )
+        kinds = classified[trace.path.name]
         for marker, metric in HOST_PHASES.items():
             ranges = []
             refs = []
             ambiguous = False
-            unsupported = False
-            for index, event in enumerate(trace.events):
-                if event.get("name") != marker:
-                    continue
-                if event["ph"] != "X":
-                    warnings.append(
-                        f"{trace.path.name} event[{index}]: unsupported host marker form"
-                    )
-                    # Unsupported marker forms can hide additional duration.
-                    # Do not publish a partial union as the complete phase.
-                    unsupported = True
-                    continue
-                owners = [
-                    m
-                    for m, t, b in boundaries
-                    if t is trace
-                    and event["pid"] == b["pid"]
-                    and event["tid"] == b["tid"]
-                    and b["ts"] <= event["ts"]
-                    and event["ts"] + event["dur"] <= b["ts"] + b["dur"]
-                ]
-                if mapping not in owners:
+            for index, event, owners in kinds["host"]:
+                if event["name"] != marker or mapping not in owners:
                     continue
                 if len(owners) != 1:
                     ambiguous = True
                     continue
-                assigned.add((trace.path.name, index))
                 ranges.append((event["ts"], event["ts"] + event["dur"]))
                 refs.append(trace.reference(index))
             if len(refs) > 1:
                 warnings.append(
                     f"step {mapping.training_step}: multiple {marker} ranges; using interval union"
                 )
-            if unsupported:
+            if marker in kinds["unsupported"]:
+                # Unsupported marker forms can hide additional duration.
+                # Do not publish a partial union as the complete phase.
                 metrics[metric] = measurement(
                     None,
                     reason="unsupported host marker form prevents complete phase timing",
@@ -324,12 +453,51 @@ def analyze_traces(
                 "measurements": metrics,
             }
         )
+
+    # One summary line per trace and marker for each retained-but-unmeasured
+    # class, with representative original indices. These are the lines a
+    # reader acts on; the raw events stay in the source trace.
     for trace in traces:
-        for index, event in enumerate(trace.events):
-            if event.get("name") in HOST_PHASES and (trace.path.name, index) not in assigned:
-                warnings.append(
-                    f"{trace.path.name} event[{index}]: host marker unmapped or ambiguous"
-                )
+        name = trace.path.name
+        kinds = classified[name]
+        for marker, items in kinds["unsupported"].items():
+            forms = sorted({form for _, form in items})
+            warnings.append(
+                f"{name}: {marker} in unsupported host marker form {forms}; "
+                f"{HOST_PHASES[marker]} withheld for every step mapped in this trace: "
+                + summarize_indices(index for index, _ in items)
+            )
+        unmapped: dict[str, list[int]] = {}
+        ambiguous: dict[str, list[int]] = {}
+        for index, event, owners in kinds["host"]:
+            if not owners:
+                unmapped.setdefault(event["name"], []).append(index)
+            elif len(owners) > 1:
+                ambiguous.setdefault(event["name"], []).append(index)
+        for marker, indices in unmapped.items():
+            warnings.append(
+                f"{name}: {marker} host marker outside every mapped step boundary "
+                "(unmapped; not measured): " + summarize_indices(indices)
+            )
+        for marker, indices in ambiguous.items():
+            warnings.append(
+                f"{name}: {marker} host marker inside several mapped step boundaries "
+                "(ambiguous; not measured): " + summarize_indices(indices)
+            )
+        for marker, indices in kinds["device"].items():
+            warnings.append(
+                f"{name}: {marker} device annotation ({DEVICE_ANNOTATION_CATEGORY}) retained "
+                "raw; not a host phase and not attributed to a step: " + summarize_indices(indices)
+            )
+        without_identity = [
+            m.event_index for m, t, _, identity in boundaries if t is trace and identity is None
+        ]
+        if without_identity:
+            warnings.append(
+                f"{name}: mapped step boundaries without a nested {IDENTITY_PREFIX}<N> identity "
+                "marker; training steps taken from the explicit map alone: "
+                + summarize_indices(without_identity)
+            )
     if not step_map:
         warnings.append("no explicit step mapping; training-step measurements unavailable")
     warnings.append(

@@ -229,7 +229,10 @@ def test_host_ranges_on_other_threads_or_crossing_boundaries_are_unmapped(tmp_pa
         (trace,), rank=1, step_map=(StepMapping(trace.path.name, 0, 4),)
     )
     assert rows[0]["measurements"]["host_data_wait_ms"]["value_ms"] is None
-    assert sum("unmapped" in warning for warning in warnings) == 2
+    unmapped = [warning for warning in warnings if "unmapped" in warning]
+    # One aggregated line per trace and marker, naming both original indices.
+    assert len(unmapped) == 1
+    assert "2 event(s): event[1], event[2]" in unmapped[0]
 
 
 def test_corrupt_compressed_body_and_range_endpoint(tmp_path):
