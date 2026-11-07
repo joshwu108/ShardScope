@@ -19,9 +19,14 @@ from typing import Any
 
 from shardscope.attribution import (
     ATTRIBUTED_KERNEL_METRIC,
+    ATTRIBUTED_TRANSFER_METRIC,
     ATTRIBUTION_BASIS,
+    ATTRIBUTION_METRICS,
+    OVERLAP_BASIS,
+    TRANSFER_OVERLAP_METRIC,
     attribute_traces,
     is_kernel_event,
+    is_transfer_event,
     validate_attribution,
 )
 from shardscope.errors import ArtifactError
@@ -199,7 +204,7 @@ def analyze_run(
     unavailable = {}
     if run.environment.get("cuda_available") is False or run.environment.get("device_count") == 0:
         unavailable = dict.fromkeys(
-            (*DEVICE_METRICS, ATTRIBUTED_KERNEL_METRIC), "recorded environment has no CUDA device"
+            (*DEVICE_METRICS, *ATTRIBUTION_METRICS), "recorded environment has no CUDA device"
         )
     if all(row.data_residency == "device" for row in run.steps):
         unavailable["device_h2d_ms"] = "recorded data_residency=device; no per-step batch transfer"
@@ -220,10 +225,14 @@ def analyze_run(
             metrics[metric] = measurement(None, reason=reason, status="not_observed")
         steps.append({"training_step": step, "boundary": None, "measurements": metrics})
     steps.sort(key=lambda item: item["training_step"])
-    # Kernel attribution runs after host analysis so it can only use validated
-    # boundaries; it adds device_attributed_kernel_ms to every step row.
+    # Device attribution runs after host analysis so it can only use validated
+    # boundaries; it adds the attributed kernel, transfer and overlap metrics
+    # to every step row and the window-level collective figures to the block.
     attribution, attribution_warnings = attribute_traces(
-        traces, steps, rank=rank, unavailable=unavailable.get(ATTRIBUTED_KERNEL_METRIC)
+        traces,
+        steps,
+        rank=rank,
+        unavailable={m: unavailable[m] for m in ATTRIBUTION_METRICS if m in unavailable},
     )
     warnings.extend(attribution_warnings)
     warnings.append("thresholds are caller configuration, not hardware-calibrated defaults")
@@ -233,7 +242,7 @@ def analyze_run(
         "source": sources,
         "steps": steps,
         "rules": list(RULE_IDS),
-        "findings": evaluate_rules(steps, config, rules=RULE_IDS),
+        "findings": evaluate_rules(steps, config, rules=RULE_IDS, attribution=attribution),
         "kernel_attribution": attribution,
         "warnings": warnings,
         "rule_config": config.to_dict() if config else None,
@@ -424,11 +433,13 @@ def validate_analysis(
             )
         metrics = row.get("measurements")
         _require(isinstance(metrics, dict), "measurements must be object")
-        # Sidecars written before kernel attribution existed lack the
-        # attributed-kernel metric; they still load, and never gain a value.
+        # Sidecars written before kernel attribution existed lack the attributed
+        # metrics, and schema-1 attribution carried only the kernel one; they
+        # still load and never gain a value. The attribution validator checks
+        # that the set present matches the block's schema.
         required = set(HOST_PHASES.values()) | set(DEVICE_METRICS)
         _require(
-            required <= metrics.keys() <= required | {ATTRIBUTED_KERNEL_METRIC},
+            required <= metrics.keys() <= required | set(ATTRIBUTION_METRICS),
             "missing or unsupported measurement fields",
         )
         for name, metric in metrics.items():
@@ -456,7 +467,7 @@ def validate_analysis(
                     f"{name}: recorded metric needs evidence and boundary",
                 )
                 _require(
-                    basis in ("host_range", "device_interval_union"),
+                    basis in ("host_range", ATTRIBUTION_BASIS, OVERLAP_BASIS),
                     f"{name}: invalid measurement basis",
                 )
                 if name in HOST_PHASES.values():
@@ -486,16 +497,30 @@ def validate_analysis(
                     _require(
                         False, f"{name}: recorded device attribution unsupported by this reader"
                     )
-                if name == ATTRIBUTED_KERNEL_METRIC:
-                    _require(basis == ATTRIBUTION_BASIS, f"{name}: needs {ATTRIBUTION_BASIS} basis")
+                if name in ATTRIBUTION_METRICS:
+                    expected = (
+                        OVERLAP_BASIS if name == TRANSFER_OVERLAP_METRIC else ATTRIBUTION_BASIS
+                    )
+                    _require(basis == expected, f"{name}: needs {expected} basis")
                     _require(
                         all(ref["file"] == boundary_ref["file"] for ref in metric["evidence"]),
                         f"{name}: evidence must come from the step's own trace",
                     )
+                    # Kernel time cites kernels, transfer time cites gpu_memcpy
+                    # events, and the overlap cites the transfers plus the
+                    # compute kernels that intersect them.
+                    accepted, kind = {
+                        ATTRIBUTED_KERNEL_METRIC: ((is_kernel_event,), "a device kernel event"),
+                        ATTRIBUTED_TRANSFER_METRIC: ((is_transfer_event,), "a gpu_memcpy event"),
+                        TRANSFER_OVERLAP_METRIC: (
+                            (is_transfer_event, is_kernel_event),
+                            "a gpu_memcpy or device kernel event",
+                        ),
+                    }[name]
                     for event in events:
                         _require(
-                            event is None or is_kernel_event(event),
-                            f"{name}: evidence is not a device kernel event",
+                            event is None or any(check(event) for check in accepted),
+                            f"{name}: evidence is not {kind}",
                         )
             else:
                 _require(
@@ -527,8 +552,15 @@ def validate_analysis(
     _require(isinstance(findings, list), "findings must be array")
     # This checks persisted comparisons against their recorded inputs; it never
     # estimates a missing measurement or supplies configuration.
+    attribution = payload.get("kernel_attribution")
     _require(
-        findings == evaluate_rules(items, rule_config, rules=rules),
+        findings
+        == evaluate_rules(
+            items,
+            rule_config,
+            rules=rules,
+            attribution=attribution if isinstance(attribution, dict) else None,
+        ),
         f"{', '.join(rules)}: findings disagree with measurements/configuration",
     )
     for finding in findings:
@@ -668,6 +700,8 @@ def run_arguments(args: argparse.Namespace) -> int:
         if (args.run / ANALYSIS_JSON).exists() and not args.overwrite:
             raise ArtifactError(f"{args.run / ANALYSIS_JSON} exists; pass --overwrite")
         config = rule_config_from_arguments(args)
+        if config is not None:
+            config.restrict(RULE_IDS, command="shardscope analyze")
         payload = analyze_run(
             args.run,
             rank=args.rank,

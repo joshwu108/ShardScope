@@ -14,6 +14,8 @@ from shardscope.errors import ArtifactError
 from shardscope.parse import DEVICE_METRICS, HOST_PHASES, measurement
 from shardscope.rules import (
     LEGACY_RULES,
+    RANK_RULE_IDS,
+    RANK_RULES,
     RULE_ID,
     RULE_IDS,
     RULES,
@@ -64,12 +66,21 @@ def only(findings, rule_id):
 
 def test_registry_is_consistent_and_serializable():
     assert tuple(spec.rule_id for spec in RULES) == RULE_IDS
-    assert len(set(RULE_IDS)) == len(RULE_IDS) and RULE_IDS[0] == RULE_ID
+    assert tuple(spec.rule_id for spec in RANK_RULES) == RANK_RULE_IDS
+    every = RULE_IDS + RANK_RULE_IDS
+    assert len(set(every)) == len(every) and RULE_IDS[0] == RULE_ID
     assert LEGACY_RULES == (RULE_ID,)
     described = describe_rules()
     assert json.loads(json.dumps(described)) == described
+    assert [rule["rule_id"] for rule in described] == list(every)
+    assert {rule["evaluated_by"] for rule in described if rule["rule_id"] in RULE_IDS} == {
+        "shardscope analyze"
+    }
+    assert {rule["evaluated_by"] for rule in described if rule["rule_id"] in RANK_RULE_IDS} == {
+        "shardscope ranks"
+    }
     owners = {}
-    for spec in RULES:
+    for spec in (*RULES, *RANK_RULES):
         assert "unconfigured" in spec.statuses
         assert len(set(spec.statuses) & TRIGGERED_STATUSES) == 1
         assert spec.required_measurements and spec.next_investigation and spec.interpretation
@@ -80,7 +91,7 @@ def test_registry_is_consistent_and_serializable():
             owners[item["key"]] = spec.rule_id
     assert set(owners) == set(RuleConfig.keys())
     # The text never promises what the evidence cannot support.
-    for spec in RULES:
+    for spec in (*RULES, *RANK_RULES):
         text = " ".join([spec.description, spec.interpretation, spec.next_investigation])
         for banned in ("root cause", "confidence", "speedup", "utilization"):
             assert banned not in text.lower(), (spec.rule_id, banned)

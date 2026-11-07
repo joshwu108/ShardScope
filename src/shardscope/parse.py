@@ -214,6 +214,16 @@ DEVICE_METRIC_REASONS = {
         "device_attributed_kernel_ms carries only the kernel ranges attributed through "
         "host launch correlation"
     ),
+    "device_h2d_ms": (
+        "complete per-step device copy time is not measured; "
+        "device_attributed_transfer_ms carries only the gpu_memcpy ranges attributed through "
+        "host copy-call correlation, with direction in its coverage"
+    ),
+    "device_collective_ms": (
+        "per-step collective time is not attributed: collective kernels are launched from a "
+        "host thread without a mapped step boundary; kernel_attribution carries window-level "
+        "per-device collective unions and their overlap with compute kernels"
+    ),
 }
 DEFAULT_DEVICE_REASON = "no validated device-to-step correlation or activity classification"
 
@@ -249,6 +259,44 @@ def interval_union_us(intervals) -> float:
         right = end if right is None else max(right, end)
     if not finite_number(total):
         raise ArtifactError("interval union overflow")
+    return total
+
+
+def _merged_intervals(intervals) -> list[tuple[float, float]]:
+    """Sorted, non-overlapping intervals covering the same points as ``intervals``."""
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if not finite_number(start) or not finite_number(end) or end < start:
+            raise ArtifactError("interval union requires finite ordered microsecond endpoints")
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def interval_intersection_us(first, second) -> float:
+    """Length of ``(union of first) & (union of second)`` in one clock and scope.
+
+    The same caveat as :func:`interval_union_us` applies: both interval sets
+    must come from the same trace and device clock, and the caller has
+    established what each set means. Overlapping members inside one set are
+    unioned first, so a copy that two kernels straddle is counted once.
+    """
+    left, right = _merged_intervals(first), _merged_intervals(second)
+    total = 0.0
+    i = j = 0
+    while i < len(left) and j < len(right):
+        start = max(left[i][0], right[j][0])
+        end = min(left[i][1], right[j][1])
+        if end > start:
+            total += end - start
+        if left[i][1] < right[j][1]:
+            i += 1
+        else:
+            j += 1
+    if not finite_number(total):
+        raise ArtifactError("interval intersection overflow")
     return total
 
 
@@ -513,8 +561,9 @@ def analyze_traces(
     if not step_map:
         warnings.append("no explicit step mapping; training-step measurements unavailable")
     warnings.append(
-        "device metrics unavailable without validated attribution; only kernel ranges tied to "
-        "a step by host launch correlation are attributed (device_attributed_kernel_ms); "
-        "raw events preserved in source traces"
+        "device metrics unavailable without complete validated attribution; only kernel and "
+        "gpu_memcpy ranges tied to a step by host launch/copy-call correlation are attributed "
+        "(device_attributed_kernel_ms, device_attributed_transfer_ms); raw events preserved in "
+        "source traces"
     )
     return sorted(rows, key=lambda row: row["training_step"]), warnings

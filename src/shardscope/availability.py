@@ -20,7 +20,12 @@ from shardscope.artifacts import (
     RunArtifacts,
     checked_analysis,
 )
-from shardscope.attribution import ATTRIBUTED_KERNEL_METRIC
+from shardscope.attribution import (
+    ATTRIBUTED_KERNEL_METRIC,
+    ATTRIBUTED_TRANSFER_METRIC,
+    ATTRIBUTION_SCHEMA,
+    TRANSFER_OVERLAP_METRIC,
+)
 from shardscope.env import NOT_OBSERVED, distributed_capable
 from shardscope.rules import TRIGGERED_STATUSES
 
@@ -91,6 +96,14 @@ def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
         )
         if name == ATTRIBUTED_KERNEL_METRIC:
             kind = _attribution_coverage(values)
+        elif name == ATTRIBUTED_TRANSFER_METRIC:
+            kind = _transfer_coverage(values)
+        elif name == TRANSFER_OVERLAP_METRIC:
+            kind = (
+                "transfer/compute overlap: intersection of the step's attributed gpu_memcpy "
+                "union with the compute-class kernel union on the same device and clock; "
+                "unavailable, not zero, when no compute kernel was collected on the device. "
+            )
         elif name.startswith("host_"):
             kind = "host ranges, not GPU execution or idle time. "
         else:
@@ -112,6 +125,18 @@ def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
             statuses[old] = FieldStatus(
                 old, value.state, f"See explicit {explicit}: {value.detail}"
             )
+    if ATTRIBUTED_TRANSFER_METRIC in statuses and "h2d_copy_ms" in statuses:
+        current = statuses["h2d_copy_ms"]
+        statuses["h2d_copy_ms"] = FieldStatus(
+            current.field,
+            current.state,
+            current.detail
+            + f" Device copy ranges attributed per step exist as {ATTRIBUTED_TRANSFER_METRIC} "
+            "(direction in its coverage); they are device activity, not host copy-call time.",
+        )
+    block = analysis.get("kernel_attribution")
+    if isinstance(block, dict) and block.get("schema") == ATTRIBUTION_SCHEMA:
+        statuses["collective_activity"] = _collective_from_attribution(block)
     if ATTRIBUTED_KERNEL_METRIC in statuses and "gpu_activity" in statuses:
         # Total busy time stays unavailable; the attributed subset is a
         # separate, partial field and is pointed to rather than substituted.
@@ -175,6 +200,61 @@ def _attribution_coverage(values: list[dict[str, Any]]) -> str:
         "host launch correlation; not utilization, step latency or total device busy time. "
         f"Coverage: {attributed}/{total} kernel event(s) attributed across "
         f"{len(by_trace)} analyzed trace(s). "
+    )
+
+
+def _transfer_coverage(values: list[dict[str, Any]]) -> str:
+    by_trace: dict[str, tuple[int, int]] = {}
+    directions: dict[str, int] = {}
+    for value in values:
+        coverage = value.get("coverage")
+        scope = value.get("scope", "")
+        trace = next((part[6:] for part in scope.split("; ") if part.startswith("trace=")), None)
+        if isinstance(coverage, dict) and trace is not None:
+            by_trace[trace] = (
+                coverage.get("trace_attributed_transfer_events", 0),
+                coverage.get("trace_transfer_events", 0),
+            )
+            for direction, entry in (coverage.get("directions") or {}).items():
+                directions[direction] = directions.get(direction, 0) + entry.get("events", 0)
+    attributed = sum(a for a, _ in by_trace.values())
+    total = sum(t for _, t in by_trace.values())
+    spelled = ", ".join(f"{k} {v}" for k, v in directions.items() if v) or "none"
+    return (
+        "attributed transfer time: per-device interval union of gpu_memcpy ranges tied to a "
+        "step by host copy-call correlation; device activity, not host copy-call time, not "
+        f"bandwidth. Coverage: {attributed}/{total} gpu_memcpy event(s) attributed across "
+        f"{len(by_trace)} analyzed trace(s); attributed directions: {spelled}. "
+    )
+
+
+def _collective_from_attribution(block: dict[str, Any]) -> FieldStatus:
+    """Window-level collective classification from the persisted attribution block."""
+    kernels = 0
+    candidates = 0
+    devices = set()
+    for name, result in block["traces"].items():
+        for entry in result["devices"]:
+            kernels += len(entry["collective_kernel_event_indices"])
+            candidates += len(entry["candidate_kernel_event_indices"])
+            if entry["collective_kernel_event_indices"]:
+                devices.add((name, entry["device"]))
+    if not kernels:
+        return FieldStatus(
+            "collective_activity",
+            NOT_RECORDED,
+            "analysis.json classified no kernel as a collective (NCCL device-kernel name plus a "
+            f"launch inside a c10d:: op); {candidates} candidate(s) carried one signal only. "
+            "Per-step collective time is not attributed in any case.",
+        )
+    return FieldStatus(
+        "collective_activity",
+        RECORDED,
+        f"analysis.json: {kernels} collective kernel(s) classified on {len(devices)} "
+        f"trace/device pair(s), with {candidates} candidate(s) excluded. Recorded as "
+        "window-level per-device unions and their intersection with compute kernels in "
+        "kernel_attribution.device_activity; not attributed to steps, and a collective "
+        "kernel's duration includes waiting for peer ranks, so it is not network time.",
     )
 
 
@@ -286,7 +366,9 @@ def _per_rank_step_ms(run: RunArtifacts) -> FieldStatus:
         "per_rank_step_ms",
         NOT_RECORDED,
         f"{STEPS_CSV} carries no rank column and no validated analysis supplies explicit rank "
-        "identity. No cross-rank measurement is inferred from directory names.",
+        "identity. No cross-rank measurement is inferred from directory names; compare the "
+        "ranks of one launch with 'shardscope ranks --root DIR', which writes ranks.json "
+        "beside the rank directories.",
     )
 
 

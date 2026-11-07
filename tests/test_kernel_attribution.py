@@ -21,6 +21,7 @@ from shardscope.analysis import analyze_run, validate_analysis, write_analysis
 from shardscope.artifacts import RunArtifacts, load_run
 from shardscope.attribution import (
     ATTRIBUTED_KERNEL_METRIC,
+    ATTRIBUTION_METRICS,
     attribute_trace,
     is_kernel_event,
     is_supported_launch,
@@ -355,22 +356,22 @@ def test_separate_devices_are_never_unioned_together(make_run):
     payload = analyze(directory)
     result = payload["kernel_attribution"]["traces"][TRACE]
     (entry,) = result["steps"]
-    assert entry["per_device"] == [
+    kernel_keys = ("device", "attributed_kernel_ms", "kernel_event_indices", "launch_event_indices")
+    assert [{k: d[k] for k in kernel_keys} for d in entry["per_device"]] == [
         {
             "device": 0,
             "attributed_kernel_ms": pytest.approx(0.15),
             "kernel_event_indices": [d0, d0b],
             "launch_event_indices": [5, 6],
-            "streams": ["7", "8"],
         },
         {
             "device": 1,
             "attributed_kernel_ms": pytest.approx(0.3),
             "kernel_event_indices": [d1],
             "launch_event_indices": [7],
-            "streams": ["7"],
         },
     ]
+    assert [d["streams"] for d in entry["per_device"]] == [["7", "8"], ["7"]]
     metric = row(payload, 1)["measurements"][METRIC]
     assert metric["status"] == "not_recorded" and metric["value_ms"] is None
     assert "span devices [0, 1]" in metric["reason"] and "not combined" in metric["reason"]
@@ -503,6 +504,7 @@ def hide_kernel_b(payload, ix):
             "correlation": 13,
             "kind": "no_host_api_event",
             "reason": "forged",
+            "class": "compute",
         }
     )
     result["kernel_events"].update(attributed=2, unmatched=1)
@@ -565,7 +567,7 @@ def hide_kernel_b(payload, ix):
             "disagrees with the attribution block|per-step kernel groups",
         ),
         (lambda p, ix: p.pop("kernel_attribution"), "requires a kernel_attribution block"),
-        (lambda p, ix: p["kernel_attribution"].update(schema=2), "unsupported schema"),
+        (lambda p, ix: p["kernel_attribution"].update(schema=3), "unsupported schema"),
         (
             lambda p, ix: p["kernel_attribution"]["traces"].update({"other.json": {}}),
             "must name sources",
@@ -636,7 +638,8 @@ def test_legacy_sidecar_without_attribution_still_loads(saved):
     legacy = copy.deepcopy(payload)
     del legacy["kernel_attribution"]
     for item in legacy["steps"]:
-        del item["measurements"][METRIC]
+        for metric in ATTRIBUTION_METRICS:
+            del item["measurements"][metric]
     legacy["warnings"] = [w for w in legacy["warnings"] if "kernel" not in w]
     write_analysis(directory, legacy, overwrite=True)
     run = load_run(directory)

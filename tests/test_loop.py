@@ -121,7 +121,14 @@ def test_loop_run_flows_through_analyze_validate_findings_and_reports(tmp_path, 
             assert row["measurements"]["host_step_ms"]["status"] == "not_recorded"
     assert payload["mapping_source"] == "capture" and payload["rules"] == list(RULE_IDS)
     triggered = {f["rule_id"] for f in payload["findings"] if f["status"].startswith("possible")}
-    assert triggered == set(RULE_IDS)
+    # The host rules were configured and fire at these thresholds; the device
+    # rules were left unconfigured and must say so rather than compare.
+    assert triggered == {"host_loader_wait", "host_h2d_share", "step_duration_variability"}
+    assert {
+        f["status"]
+        for f in payload["findings"]
+        if f["rule_id"] in ("device_transfer_overlap", "collective_compute_overlap")
+    } == {"unconfigured"}
     write_analysis(out, payload)
     run = load_run(out)
     validate_analysis(run.analysis, directory=out, environment=run.environment)

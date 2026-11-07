@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from shardscope.artifacts import ENVIRONMENT_JSON, STEPS_CSV, SUMMARY_JSON, RunArtifacts
-from shardscope.attribution import ATTRIBUTED_KERNEL_METRIC
+from shardscope.attribution import (
+    ATTRIBUTED_KERNEL_METRIC,
+    ATTRIBUTED_TRANSFER_METRIC,
+    ATTRIBUTION_SCHEMA,
+    TRANSFER_OVERLAP_METRIC,
+)
 from shardscope.availability import NOT_OBSERVED, NOT_RECORDED, RECORDED, field_statuses
 from shardscope.errors import ReportError
 from shardscope.parse import summarize_indices
@@ -327,7 +332,8 @@ def _analysis_section(run: RunArtifacts) -> str:
         "<h2>Persisted trace analysis</h2>",
         f"<p>analysis.json schema 1; explicit rank {analysis['rank']}. "
         "Host and device durations are distinct, in milliseconds. "
-        "Host copy calls are not device transfer time; host wait is not GPU idle time.</p>",
+        "Host copy calls are not device transfer time; host wait is not GPU idle time; "
+        "an overlap is the intersection of two device unions on one device clock.</p>",
         _table(
             (
                 "training step",
@@ -486,4 +492,182 @@ def _attribution_section(analysis: Mapping[str, Any], evidence_links) -> list[st
             "representative original event indices; each record is in analysis.json.</p>"
         )
         lines.append(_table(("trace", "outcome", "reason", "kernel events"), outcome_rows))
+    if block["schema"] == ATTRIBUTION_SCHEMA:
+        lines.extend(_transfer_section(analysis, block, evidence_links))
+        lines.extend(_collective_section(block))
+    else:
+        lines.append(
+            '<p class="sub">This analysis.json carries schema 1 attribution (kernels only); '
+            "transfer attribution and collective classification are not shown. Re-run "
+            "shardscope analyze --overwrite to add them.</p>"
+        )
+    return lines
+
+
+def _transfer_section(analysis: Mapping[str, Any], block: Mapping[str, Any], evidence_links):
+    """Persisted transfer attribution and its overlap with compute kernels."""
+    lines = ["<h2>Device transfer attribution</h2>"]
+    lines.append(
+        f"<p>{_esc(block['transfer_scope'])}. {_esc(block['overlap_scope'])}. Supported copy "
+        "calls: "
+        + ", ".join(f"<code>{_esc(x)}</code>" for x in block["supported_copy_events"])
+        + f"; transfer category <code>{_esc(block['transfer_category'])}</code>. Device copy "
+        "time is not host copy-call time (host_h2d_ms) and no bandwidth is derived.</p>"
+    )
+    trace_rows = []
+    outcome_rows = []
+    for name in sorted(block["traces"]):
+        result = block["traces"][name]
+        transfers, copies = result["transfer_events"], result["copy_events"]
+        trace_rows.append(
+            f'<tr><td class="mono">{_esc(name)}</td>'
+            f'<td class="num">{transfers["total"]}</td>'
+            f'<td class="num">{transfers["attributed"]}</td>'
+            f'<td class="num">{transfers["unmatched"]}</td>'
+            f'<td class="num">{transfers["ambiguous"]}</td>'
+            f'<td class="num">{copies["attributed"]}</td>'
+            f'<td class="num">{copies["outside_mapped_step"]}</td>'
+            f'<td class="num">{copies["ambiguous_boundary"]}</td>'
+            f'<td class="num">{copies["duplicate_correlation"]}</td>'
+            f'<td class="num">{copies["missing_correlation"]}</td></tr>'
+        )
+        by_kind: dict[tuple[str, str], list[int]] = {}
+        for label in ("transfers_unmatched", "transfers_ambiguous"):
+            for record in result[label]:
+                by_kind.setdefault((label[10:], record["kind"]), []).append(
+                    record["transfer_event_index"]
+                )
+        for (label, kind), indices in sorted(by_kind.items()):
+            outcome_rows.append(
+                f'<tr><td class="mono">{_esc(name)}</td><td>{_esc(label)}</td>'
+                f'<td class="mono">{_esc(kind)}</td>'
+                f"<td>{_esc(summarize_indices(indices))}</td></tr>"
+            )
+    lines.append(
+        _table(
+            (
+                "trace",
+                "gpu_memcpy events",
+                "attributed",
+                "unmatched",
+                "ambiguous",
+                "copy calls attributed",
+                "copy calls outside mapped steps",
+                "copy calls in ambiguous boundaries",
+                "duplicate correlation ids",
+                "copy calls without correlation",
+            ),
+            trace_rows,
+        )
+    )
+    step_rows = []
+    for step in analysis["steps"]:
+        transfer = step["measurements"].get(ATTRIBUTED_TRANSFER_METRIC)
+        overlap = step["measurements"].get(TRANSFER_OVERLAP_METRIC)
+        if transfer is None or overlap is None or step["boundary"] is None:
+            continue
+        coverage = transfer.get("coverage", {})
+        directions = coverage.get("directions", {})
+        spelled = ", ".join(
+            f"{direction} {entry['events']}"
+            + (f" ({_cell(entry['ms'])} ms)" if entry.get("ms") is not None else "")
+            for direction, entry in directions.items()
+            if entry.get("events")
+        )
+        transfer_ms = "unavailable" if transfer["value_ms"] is None else _cell(transfer["value_ms"])
+        overlap_ms = "unavailable" if overlap["value_ms"] is None else _cell(overlap["value_ms"])
+        step_rows.append(
+            f'<tr><td class="num">{step["training_step"]}</td>'
+            f'<td class="mono">{_esc(step["boundary"]["file"])}</td>'
+            f"<td>{_esc(_cell(coverage.get('devices')))}</td>"
+            f'<td class="num">{_esc(transfer_ms)}</td>'
+            f"<td>{_esc(transfer['status'])}</td>"
+            f"<td>{_esc(spelled or 'none')}</td>"
+            f'<td class="num">{_esc(overlap_ms)}</td>'
+            f"<td>{_esc(overlap['status'])}</td>"
+            f"<td>{_esc(_cell(coverage.get('completeness')))}; "
+            f"{_esc(_cell(coverage.get('trace_attributed_transfer_events')))}/"
+            f"{_esc(_cell(coverage.get('trace_transfer_events')))} gpu_memcpy events in trace</td>"
+            f"<td>{evidence_links(transfer['evidence'])}</td></tr>"
+        )
+    lines.append(
+        '<p class="sub">Per mapped step: the interval union of attributed gpu_memcpy ranges on one '
+        "device, and the part of that union during which a compute-class kernel ran on the "
+        "same device. Overlap is unavailable, not zero, when no compute kernel was collected "
+        "on the device.</p>"
+    )
+    lines.append(
+        _table(
+            (
+                "training step",
+                "trace",
+                "device",
+                "attributed transfer ms",
+                "availability",
+                "directions",
+                "overlap with compute ms",
+                "overlap availability",
+                "coverage",
+                "transfer evidence",
+            ),
+            step_rows,
+        )
+    )
+    if outcome_rows:
+        lines.append(
+            '<p class="sub">gpu_memcpy events that were not attributed, by outcome and reason, '
+            "with representative original event indices.</p>"
+        )
+        lines.append(_table(("trace", "outcome", "reason", "transfer events"), outcome_rows))
+    return lines
+
+
+def _collective_section(block: Mapping[str, Any]) -> list[str]:
+    """Window-level per-device kernel classes and collective/compute overlap."""
+    lines = ["<h2>Device kernel classes and collective overlap</h2>"]
+    classification = block["collective_classification"]
+    lines.append(
+        f"<p>{_esc(block['collective_scope'])}. A kernel is a collective when its name starts "
+        "with "
+        + ", ".join(f"<code>{_esc(x)}</code>" for x in classification["kernel_name_prefixes"])
+        + f" and its launch is nested in a <code>{_esc(classification['host_op_prefix'])}</code> "
+        "host op; one signal alone makes a candidate that is in neither set. Figures are per "
+        "trace window and device, not per step; a collective's duration includes waiting for "
+        "peer ranks and is not network time.</p>"
+    )
+    rows = []
+    for name in sorted(block["traces"]):
+        for activity in block["traces"][name]["device_activity"]:
+            device = next(
+                d for d in block["traces"][name]["devices"] if d["device"] == activity["device"]
+            )
+            overlap = activity["collective_compute_overlap_ms"]
+            exposed = None if overlap is None else activity["collective_kernel_ms"] - overlap
+            rows.append(
+                f'<tr><td class="mono">{_esc(name)}</td>'
+                f'<td class="num">{activity["device"]}</td>'
+                f'<td class="num">{activity["compute_kernel_events"]}</td>'
+                f'<td class="num">{_esc(_cell(activity["compute_kernel_ms"]))}</td>'
+                f'<td class="num">{activity["collective_kernel_events"]}</td>'
+                f'<td class="num">{len(device["candidate_kernel_event_indices"])}</td>'
+                f'<td class="num">{_esc(_cell(activity["collective_kernel_ms"]))}</td>'
+                f'<td class="num">{_esc(_cell(overlap))}</td>'
+                f'<td class="num">{_esc(_cell(exposed))}</td></tr>'
+            )
+    lines.append(
+        _table(
+            (
+                "trace",
+                "device",
+                "compute kernels",
+                "compute union ms",
+                "collective kernels",
+                "candidates",
+                "collective union ms",
+                "collective/compute overlap ms",
+                "exposed collective ms",
+            ),
+            rows,
+        )
+    )
     return lines

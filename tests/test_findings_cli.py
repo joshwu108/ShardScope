@@ -23,7 +23,14 @@ from shardscope.cli import main
 from shardscope.errors import ArtifactError
 from shardscope.findings import render_findings_text, summarize_findings
 from shardscope.report import render_html, render_json
-from shardscope.rules import LEGACY_RULES, RULE_ID, RULE_IDS, RuleConfig, evaluate_rules
+from shardscope.rules import (
+    LEGACY_RULES,
+    RANK_RULE_IDS,
+    RULE_ID,
+    RULE_IDS,
+    RuleConfig,
+    evaluate_rules,
+)
 
 TRACE = "trace-synthetic.json"
 MAP = "map.json"
@@ -88,7 +95,7 @@ def test_rules_text_and_json_describe_the_registry(capsys):
     assert "never calibrated defaults" in text and "requires" in text
     assert main(["rules", "--format", "json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert [rule["rule_id"] for rule in payload["rules"]] == list(RULE_IDS)
+    assert [rule["rule_id"] for rule in payload["rules"]] == list(RULE_IDS + RANK_RULE_IDS)
     keys = {item["key"] for rule in payload["rules"] for item in rule["config"]}
     assert keys == set(RuleConfig.keys())
     for rule in payload["rules"]:
@@ -348,6 +355,8 @@ def test_legacy_sidecar_without_a_rule_set_still_loads_and_is_labelled(synthetic
         (RULE_ID, True),
         ("host_h2d_share", False),
         ("step_duration_variability", False),
+        ("device_transfer_overlap", False),
+        ("collective_compute_overlap", False),
     ]
     # A legacy unconfigured sidecar carries exactly one finding.
     unconfigured = {k: v for k, v in payload.items() if k != "rules"}
@@ -403,7 +412,9 @@ def test_findings_and_rules_import_no_torch_and_run_as_console_script(synthetic_
     assert analyze_cli(synthetic_run, *THRESHOLDS) == 0
     listed = subprocess.run([script, "rules", "--format", "json"], capture_output=True, text=True)
     assert listed.returncode == 0 and listed.stderr == ""
-    assert [r["rule_id"] for r in json.loads(listed.stdout)["rules"]] == list(RULE_IDS)
+    assert [r["rule_id"] for r in json.loads(listed.stdout)["rules"]] == list(
+        RULE_IDS + RANK_RULE_IDS
+    )
     shown = subprocess.run(
         [script, "findings", "--run", str(synthetic_run), "--format", "json"],
         capture_output=True,

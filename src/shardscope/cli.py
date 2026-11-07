@@ -5,9 +5,11 @@ artifacts, and ``report`` renders HTML, JSON or CSV without adding measurements.
 
 ``profile`` captures diagnostic traces; ``bench`` measures unprofiled windows
 and ``compare`` reports descriptive differences with significance unconfigured.
-``analyze`` persists offline host-range analysis using explicit step mappings.
-``rules`` lists the diagnostic rules ``analyze`` can evaluate and their evidence
-requirements; ``findings`` shows the findings a persisted analysis.json holds.
+``analyze`` persists offline host-range analysis using explicit step mappings;
+``ranks`` persists the cross-rank step comparison of one torchrun launch.
+``rules`` lists the diagnostic rules ``analyze`` and ``ranks`` can evaluate and
+their evidence requirements; ``findings`` shows the findings a persisted
+analysis.json or ranks.json holds.
 Diagnostic and throughput measurements remain separate commands.
 Memory sweeps are outside the current command interface.
 """
@@ -153,9 +155,24 @@ def build_parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze", help="analyze saved traces with explicit step mappings")
     add_arguments(analyze)
 
+    from shardscope.ranks import add_arguments as add_rank_arguments
+
+    ranks_cmd = sub.add_parser(
+        "ranks",
+        help="compare the recorded step durations of one torchrun launch across its ranks",
+        description=(
+            "Read every rank-NNNNN run directory under --root, check that the ranks recorded "
+            "compatible work, align their steps.csv rows by training step and persist the "
+            "comparison as ranks.json beside them. Durations are compared on each rank's own "
+            "clock; no timestamp is compared across machines and no straggler is named. Rank "
+            "directories are never modified."
+        ),
+    )
+    add_rank_arguments(ranks_cmd)
+
     rules_cmd = sub.add_parser(
         "rules",
-        help="list the diagnostic rules analyze can evaluate and their evidence requirements",
+        help="list the diagnostic rules analyze and ranks can evaluate and their evidence",
         description=(
             "Describe every diagnostic rule: its stable id, the persisted measurements it "
             "needs, the thresholds it takes (with units and ranges), the statuses it can "
@@ -181,12 +198,18 @@ def build_parser() -> argparse.ArgumentParser:
             "sidecar will not load, 0 otherwise, whatever the findings say."
         ),
     )
-    findings_cmd.add_argument(
+    target = findings_cmd.add_mutually_exclusive_group(required=True)
+    target.add_argument(
         "--run",
         metavar="DIR",
         type=Path,
-        required=True,
         help="run directory holding steps.csv, environment.json and analysis.json",
+    )
+    target.add_argument(
+        "--ranks",
+        metavar="DIR",
+        type=Path,
+        help="launch root holding rank-NNNNN directories and the ranks.json 'ranks' wrote",
     )
     findings_cmd.add_argument(
         "--format",
@@ -251,6 +274,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         from shardscope.analysis import run_arguments
 
         return run_arguments(args)
+
+    if args.command == "ranks":
+        from shardscope.ranks import run_arguments as run_rank_arguments
+
+        return run_rank_arguments(args)
 
     if args.command == "rules":
         return _run_rules(args)
@@ -331,12 +359,13 @@ def _run_rules(args: argparse.Namespace) -> int:
         print(json.dumps({"rules": rules}, indent=2, sort_keys=True))
         return 0
     lines = [
-        "diagnostic rules (evaluated by 'shardscope analyze'; thresholds are caller "
-        "configuration, never calibrated defaults)"
+        "diagnostic rules (per-rank rules are evaluated by 'shardscope analyze', cross-rank "
+        "rules by 'shardscope ranks'; thresholds are caller configuration, never calibrated "
+        "defaults)"
     ]
     for rule in rules:
         lines.append("")
-        lines.append(f"{rule['rule_id']}  ({rule['granularity']})")
+        lines.append(f"{rule['rule_id']}  ({rule['granularity']}; {rule['evaluated_by']})")
         lines.append(f"  {rule['description']}")
         lines.append(f"  requires        {', '.join(rule['required_measurements'])}")
         lines.append(f"  scope           {rule['scope']}")
@@ -357,14 +386,26 @@ def _run_findings(args: argparse.Namespace) -> int:
     """Summarize persisted findings; loading failures exit 2 like 'report'."""
     import json
 
-    from shardscope.findings import render_findings_text, summarize_findings
+    from shardscope.findings import (
+        render_findings_text,
+        render_rank_findings_text,
+        summarize_findings,
+        summarize_rank_findings,
+    )
 
-    run = load_run(args.run)
-    summary = summarize_findings(run, rule_ids=args.rule or (), statuses=args.status or ())
+    if args.ranks is not None:
+        summary = summarize_rank_findings(
+            args.ranks, rule_ids=args.rule or (), statuses=args.status or ()
+        )
+        render = render_rank_findings_text
+    else:
+        run = load_run(args.run)
+        summary = summarize_findings(run, rule_ids=args.rule or (), statuses=args.status or ())
+        render = render_findings_text
     if args.format == "json":
         sys.stdout.write(json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n")
         return 0
-    sys.stdout.write(render_findings_text(summary))
+    sys.stdout.write(render(summary))
     return 0
 
 

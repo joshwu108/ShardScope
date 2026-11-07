@@ -222,7 +222,7 @@ def test_warnings_do_not_repeat_per_event(captured_run):
     payload = analyze_run(captured_run)
     warnings = payload["warnings"]
     # 47 raw events, 29 of them not host-measurable; the summary stays short.
-    assert len(warnings) <= 12
+    assert len(warnings) <= 14
     assert len({shape(w) for w in warnings}) == len(warnings)
     # The two standing caveats about unavailable device metrics and thresholds remain.
     assert any(w.startswith("device metrics unavailable") for w in warnings)

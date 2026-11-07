@@ -137,13 +137,17 @@ Commands
      - Measure unprofiled throughput.
    * - ``shardscope compare``
      - Compare two benchmark results.
-   * - ``python -m shardscope.analysis``
+   * - ``shardscope analyze``
      - Analyze a profiled run's traces and write ``analysis.json``.
+   * - ``shardscope ranks``
+     - Compare the recorded step durations of one ``torchrun`` launch across
+       its rank directories and write ``ranks.json``.
    * - ``shardscope rules``
-     - List the diagnostic rules ``analyze`` can evaluate, with their evidence
-       requirements, thresholds and statuses.
+     - List the diagnostic rules ``analyze`` and ``ranks`` can evaluate, with
+       their evidence requirements, thresholds and statuses.
    * - ``shardscope findings``
-     - Summarize the findings a run's ``analysis.json`` already holds.
+     - Summarize the findings a run's ``analysis.json`` or a launch's
+       ``ranks.json`` already holds.
    * - ``examples/train_ddp.py``
      - Run the fixture under DDP with ``torchrun``.
    * - ``examples/profile_delayed.py``
@@ -435,8 +439,9 @@ that ID, never through GPU timestamp containment in a host step:
    host CUDA API events in one trace is a conflict, and nothing is chosen.
 2. The host event must be a supported kernel-launch form:
    ``cudaLaunchKernel`` or ``cudaLaunchKernelExC`` in category
-   ``cuda_runtime``. Driver-API launches and copy or memset calls are reported
-   as unsupported, not guessed at.
+   ``cuda_runtime``, or ``cuLaunchKernelEx`` in category ``cuda_driver`` (the
+   form NCCL uses for its collective kernels). Other driver-API launches and
+   memset calls are reported as unsupported, not guessed at.
 3. The launch range must lie entirely inside exactly one mapped
    ``shardscope/step`` boundary on the same process and thread. A launch on a
    host thread that carries no mapped boundary, such as the autograd engine
@@ -447,13 +452,16 @@ that ID, never through GPU timestamp containment in a host step:
 Several kernels may reference one unambiguous launch. A kernel that executes
 after its step's host boundary has ended is still attributed to the step that
 launched it. ``gpu_user_annotation``, ``gpu_memcpy``, and ``gpu_memset``
-events are not kernels and are never counted.
+events are not kernels and are never counted as kernel time; ``gpu_memcpy``
+events are attributed separately (below).
 
-The result is persisted under ``kernel_attribution``: per trace, the launch
-lookup (correlation ID, training step, launch event index, boundary event
-index), every attributed kernel with its launch and device, every unmatched or
-ambiguous kernel with a reason, excluded launches by reason, and per-step,
-per-device interval unions. Each mapped step also gains the measurement
+The result is persisted under ``kernel_attribution`` (schema 2): per trace,
+the launch lookup (correlation ID, training step, launch event index, boundary
+event index), every attributed kernel with its launch, device and class, every
+unmatched or ambiguous kernel with a reason, excluded launches by reason, the
+same records for copies, the per-device kernel classes, the window-level
+``device_activity`` figures, and per-step, per-device interval unions. Each
+mapped step also gains the measurement
 ``device_attributed_kernel_ms`` (``basis: device_interval_union``): the
 interval union of the kernel ranges attributed to that step on one device. It
 is *attributed kernel time*. It is not utilization, not total step latency,
@@ -469,7 +477,63 @@ kernel execution rather than a complete compute measurement.
 and refuse a sidecar whose attributed, unmatched, or ambiguous records, launch
 lookup, or per-step kernel groups disagree with it; they never re-time a
 kernel. Sidecars written before this feature load unchanged and simply have no
-attributed kernel time.
+attributed kernel time; schema 1 sidecars (kernels only, written before
+transfer attribution) are rechecked with the launch forms they were computed
+with and gain nothing. ``shardscope analyze --overwrite`` upgrades either.
+
+Transfer attribution and transfer/compute overlap
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Device copies are attributed the same way, through the correlation ID of a
+host ``cudaMemcpyAsync`` call (category ``cuda_runtime``) whose range lies
+inside exactly one mapped step boundary on the launching thread. Each
+attributed ``gpu_memcpy`` event carries a direction parsed from its Kineto
+name, ``Memcpy <kind> (<src> -> <dst>)``: ``HtoD`` is ``h2d``, ``DtoH`` is
+``d2h``, every other kind (``DtoD``, array and peer copies) is ``other``, and
+a name that does not follow the form is ``unknown``. Copies issued from a
+thread without a mapped boundary, such as the DDP bucket copies the autograd
+thread makes, are listed as outside every mapped step. Two measurements result
+per mapped step:
+
+- ``device_attributed_transfer_ms`` (``basis: device_interval_union``): the
+  interval union of the attributed ``gpu_memcpy`` ranges on one device, any
+  direction. The ``coverage`` block splits events, union and recorded byte
+  counts by direction. It is device copy activity, not the host copy-call time
+  ``host_h2d_ms`` and not bandwidth: no rate is derived even where Kineto
+  recorded ``bytes``.
+- ``device_transfer_compute_overlap_ms`` (``basis:
+  device_interval_intersection``): the intersection of that union with the
+  union of every compute-class kernel on the same device in the same trace,
+  whichever step launched it. The difference, exposed transfer time, is the
+  copy time during which the device ran no compute kernel. The overlap is
+  ``not_recorded``, never zero, when the step has no attributed transfer or
+  the device recorded no compute kernel, because a zero would not distinguish
+  idle compute from missing kernel collection.
+
+Both are per device and per trace; a step whose transfers span several devices
+withholds the figure, as the kernel metric does.
+
+Collective classification and collective/compute overlap
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+NCCL collectives execute as ordinary CUDA kernels, so every kernel is given a
+class. A kernel is ``collective`` only when two independent signals agree: its
+name starts with ``ncclDevKernel_`` or ``ncclKernel_`` (the NCCL device kernel
+naming scheme), and its launch is nested inside a ``c10d::`` host operator
+(``c10d::allreduce_`` and its siblings, which PyTorch's ``ProcessGroupNCCL``
+records around every collective). A kernel with one signal only is a
+``collective_candidate`` and belongs to neither set; everything else is
+``compute``. The ``device_activity`` entry of each trace and device persists
+the number of compute and collective kernels, their interval unions and the
+intersection of the two, ``collective_compute_overlap_ms``. All three are
+window-level figures over the whole trace on one device clock. They are not
+attributed to training steps, because in the recorded captures the collective
+is launched from the autograd thread, which carries no mapped boundary, and
+no per-step collective time is invented from timestamp containment.
+
+A collective kernel's duration includes the time it waits for peer ranks to
+arrive. It is therefore not network transfer time, and the exposed collective
+share says nothing about which rank arrived late.
 
 A CUDA capture also contains device-side copies of the markers: Kineto emits
 them with category ``gpu_user_annotation`` on a GPU stream. Analysis
@@ -517,6 +581,30 @@ data for scripts.
        raises the required step count. Steps that recorded different host
        phase sets are reported ``ambiguous`` instead of compared. Triggered
        status ``possible_step_variability``; it does not compare ranks.
+   * - ``device_transfer_overlap``
+     - ``device_attributed_transfer_ms``,
+       ``device_transfer_compute_overlap_ms``
+     - ``(transfer - overlap) / transfer >= transfer_exposed_share`` (fraction
+       in [0, 1]), per step, both from one device in one trace. Triggered
+       status ``possible_exposed_transfer``: the configured share of the
+       step's attributed copy time ran with no compute kernel on the device.
+       Device activity, not host copy-call time, not bandwidth.
+   * - ``collective_compute_overlap``
+     - ``kernel_attribution`` ``device_activity`` with collective kernels
+     - ``(collective - overlap) / collective >= collective_exposed_share``
+       (fraction in [0, 1]), one finding per analyzed trace and device over
+       the captured window; ``unavailable`` when no kernel was classified as
+       a collective or the sidecar predates classification. Triggered status
+       ``possible_exposed_collective``. Not per step, not network time, and
+       not a communication tail measurement.
+   * - ``rank_step_imbalance`` (``shardscope ranks``)
+     - ``steps.csv`` ``step_time_ms`` on every rank of one launch
+     - ``max(step_time_ms) / min(step_time_ms) >= rank_imbalance_ratio``
+       (ratio >= 1), per training step across ranks whose recordings are
+       compatible. ``incompatible`` and ``incomplete`` (missing rank
+       directories or a step not recorded on every rank) compare nothing.
+       Triggered status ``possible_rank_imbalance``; it names the slowest and
+       fastest recorded rank, not a straggler.
 
 Every rule reports ``unconfigured`` without a threshold and ``unavailable``
 when a required measurement is not recorded. ``ambiguous`` means the inputs
@@ -525,7 +613,11 @@ are recorded but the comparison is undefined or inconsistent;
 the compared values, the operator, the threshold and the evidence references
 (trace filename and original event index). ``analysis.json`` records the
 evaluated rule ids under ``rules``; sidecars written before that key existed
-are validated against the single ``host_loader_wait`` rule and keep loading.
+are validated against the single ``host_loader_wait`` rule and keep loading,
+and sidecars written before the device rules existed list them as not
+evaluated. The threshold keys form one vocabulary: ``analyze`` refuses
+``rank_imbalance_ratio`` and ``ranks`` refuses the per-rank keys, so a
+threshold is never persisted where nothing compares it.
 
 .. code-block:: console
 
@@ -534,22 +626,30 @@ are validated against the single ``host_loader_wait`` rule and keep loading.
    $ shardscope findings --run runs/delayed
    $ shardscope findings --run runs/delayed --format json --rule host_h2d_share \
        --status possible_host_copy_wait
+   $ shardscope analyze --run runs/ddp/rank-00000 --threshold transfer_exposed_share=0.5 \
+       --threshold collective_exposed_share=0.5
+   $ shardscope ranks --root runs/ddp --threshold rank_imbalance_ratio=1.5
+   $ shardscope findings --ranks runs/ddp
 
 ``findings`` reads the persisted sidecar (validated against its sources, so a
 stale one is refused), evaluates nothing, and exits ``0`` whatever the
 findings say; ``2`` means the run or its sidecar would not load. ``--rule``
 and ``--status`` filter what is listed while the per-status counts keep
-describing every finding.
+describing every finding. ``--ranks`` reads ``ranks.json`` the same way.
 
-Candidates not implemented, and the evidence each needs: host synchronization
-overhead (a persisted per-step union of host ``cudaDeviceSynchronize`` /
-``cudaStreamSynchronize`` ranges inside the step boundary), transfer/compute
-and collective/compute overlap and communication tail (validated
-``device_h2d_ms``, ``device_collective_ms`` and compute activity on one
-device clock), rank duration imbalance (per-rank sidecars aligned by training
-step, with equal logical work established), and many short kernels (persisted
-per-kernel durations with complete attribution coverage and a host launch-side
-measurement). None of these is reported from partial evidence.
+Candidates not implemented, and the evidence each needs: communication tail
+(collective kernels and the backward compute of the same training step on one
+device clock, which needs the autograd thread's launches to be attributable to
+a step; today the collective's launch carries no mapped boundary, so only the
+window-level overlap above is reported), per-step collective time (the same
+evidence), transfer bandwidth (validated byte counts on every copy plus a
+defined timing basis for a rate), host synchronization overhead (a persisted
+per-step union of host ``cudaDeviceSynchronize`` / ``cudaStreamSynchronize``
+ranges inside the step boundary), a straggler rank (cross-rank timing on one
+clock, or per-rank collective arrival times, neither of which is recorded),
+and many short kernels (persisted per-kernel durations with complete
+attribution coverage and a host launch-side measurement). None of these is
+reported from partial evidence.
 
 ``validate`` and ``report`` load ``analysis.json`` when present. They check
 its schema, rank, step references, and source digests; a sidecar whose
@@ -611,6 +711,32 @@ an independently loadable directory:
 Rank directories are published separately; a failure on one rank can leave
 others complete. Validate each rank directory individually. Analysis aligns
 ranks by training-step index, not wall-clock time.
+
+Cross-rank comparison
+---------------------
+
+``shardscope ranks --root runs/ddp`` reads every ``rank-NNNNN`` directory,
+checks that the ranks recorded one launch (each ``environment.json`` must name
+its own rank and the same ``world_size``, and the workload and measurement
+keys listed under ``compatibility.required_agreement`` in the output must
+agree; per-rank keys such as ``pid``, ``hostname`` and ``data_partition`` are
+recorded as differing, not compared), aligns ``steps.csv`` rows by training
+step and persists ``ranks.json`` beside the rank directories. For each step it
+records every rank's ``step_time_ms``, the minimum and maximum with their
+ranks, the spread and the ``max / min`` ratio. Each ``step_time_ms`` is the
+rank's own host-clock duration between device synchronizations; durations are
+compared and timestamps never are, so no clock alignment between machines is
+assumed. A step is compared only when every rank recorded it, synchronized,
+under the same data residency; when every rank also has a validated
+``analysis.json``, the ranks must have recorded the same set of host phases for
+the step, as a check that they did equivalent logical work. Missing rank
+directories and unrecorded steps are reported as ``incomplete``, never
+filled in. A longer recorded step does not identify a straggler: with
+synchronized DDP steps the faster ranks spend the difference waiting inside
+the collective. ``shardscope findings --ranks runs/ddp`` summarizes the
+persisted comparison; both commands validate ``ranks.json`` against the rank
+directories (digests and a full recomputation) before showing it, and refuse
+to overwrite it without ``--overwrite``. Rank directories are never modified.
 
 Validation and reports
 ======================
@@ -685,6 +811,17 @@ Measurement notes
 - ``device_attributed_kernel_ms`` covers only kernels whose launch was
   resolved to a mapped step on the launching thread. It is a per-device
   interval union of those kernels, not GPU utilization or device busy time.
+- ``device_attributed_transfer_ms`` is the per-device union of ``gpu_memcpy``
+  ranges whose copy call was resolved the same way; it is device copy
+  activity, not host copy-call time and not bandwidth.
+- An overlap (``device_transfer_compute_overlap_ms``,
+  ``collective_compute_overlap_ms``) is the intersection of two interval
+  unions on one device clock; the exposed remainder is the part of the first
+  union during which nothing in the second ran.
+- Collective figures are per trace window and device, not per step, and a
+  collective kernel's duration includes waiting for peer ranks.
+- Cross-rank step comparison uses each rank's own ``step_time_ms``; it ranks
+  recorded durations and does not identify which rank caused a difference.
 - Host phase timings from a profiled run include profiler overhead.
 - Cross-host trace alignment uses step identity and assumes no clock
   synchronization.
@@ -692,14 +829,19 @@ Measurement notes
 Known limitations
 =================
 
-- Device-side copy, collective, and total busy-time attribution is not
-  reported. Kernel attribution covers only launches made from a thread that
-  carries a mapped step boundary; kernels launched from the autograd engine
-  thread stay unattributed and are listed as such. Raw device events are
-  preserved in the trace files.
-- Analysis measures host ranges and attributed kernel ranges only. An
-  embedded or explicit step mapping is required to attribute either to
+- Total device busy time, per-step collective time and communication tail are
+  not reported. Kernel and copy attribution cover only launches and copy calls
+  made from a thread that carries a mapped step boundary; kernels and bucket
+  copies launched from the autograd engine thread, including the NCCL
+  collectives, stay unattributed per step and are listed as such. Collective
+  activity is reported only as window-level per-device unions. Raw device
+  events are preserved in the trace files.
+- Analysis measures host ranges and attributed kernel and copy ranges only. An
+  embedded or explicit step mapping is required to attribute any of them to
   training steps.
+- ``ranks`` compares the training steps ``steps.csv`` records; microbatch or
+  gradient-accumulation structure inside a step is not recorded and is not
+  compared.
 - Capture on MPS is not supported.
 - With the PyTorch build this was developed against (2.15), a profiler
   session that requests only the ``cpu`` activity disables CUDA kernel

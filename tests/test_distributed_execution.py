@@ -206,3 +206,107 @@ def test_real_torchrun_ddp(tmp_path, profiled):
         if profiled:
             assert len(extra["capture"]["trace_files"]) == 2
             assert all(x["rank"] == rank for x in extra["capture"]["step_map"])
+
+
+@pytest.mark.gpu
+@pytest.mark.distributed
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="requires >=2 real CUDA devices; CPU DDP is not acceptance",
+)
+@pytest.mark.skipif(not ddp.dist.is_nccl_available(), reason="NCCL backend is unavailable")
+def test_real_torchrun_ddp_classifies_collectives_and_compares_ranks(tmp_path):
+    """Two-GPU acceptance: NCCL kernels are classified from both signals and
+    the per-rank recordings compare as one launch.
+    """
+    from shardscope.analysis import analyze_run, write_analysis
+    from shardscope.attribution import is_kernel_event
+    from shardscope.cli import main
+    from shardscope.ranks import analyze_ranks, load_ranks, write_ranks
+    from shardscope.rules import RuleConfig
+
+    config = dict(
+        device="cuda",
+        steps=6,
+        batch_size=2,
+        samples=16,
+        capture=dict(wait=1, warmup=1, active=1, repeat=2, activities=["cpu", "cuda"]),
+    )
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    out = tmp_path / "ranks"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc-per-node=2",
+            "examples/train_ddp.py",
+            "--config",
+            str(path),
+            "--out",
+            str(out),
+            "--profile",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    for rank in range(2):
+        directory = ddp.rank_directory(out, rank)
+        payload = analyze_run(directory, config=RuleConfig(collective_exposed_share=0.0))
+        write_analysis(directory, payload)
+        traces = payload["kernel_attribution"]["traces"]
+        collectives = 0
+        for name, result in traces.items():
+            events = json.loads((directory / name).read_text())["traceEvents"]
+            for record in result["attributed"] + result["unmatched"] + result["ambiguous"]:
+                kernel = events[record["kernel_event_index"]]
+                assert is_kernel_event(kernel) and record["class"] in (
+                    "compute",
+                    "collective",
+                    "collective_candidate",
+                )
+                if record["class"] == "collective":
+                    collectives += 1
+                    assert kernel["name"].startswith(("ncclDevKernel_", "ncclKernel_"))
+                    # Launched from the autograd thread: never attributed to a step.
+                    assert record["kind"] == "launch_outside_mapped_step"
+            for entry in result["devices"]:
+                if entry["collective_kernel_event_indices"]:
+                    assert entry["device"] == rank
+            for entry in result["device_activity"]:
+                if entry["collective_kernel_events"]:
+                    assert entry["device"] == rank
+                    assert entry["collective_kernel_ms"] > 0
+                    assert (
+                        0 <= entry["collective_compute_overlap_ms"] <= entry["collective_kernel_ms"]
+                    )
+        assert collectives > 0, f"rank {rank}: no NCCL kernel classified as a collective"
+        statuses = {
+            f["status"] for f in payload["findings"] if f["rule_id"] == "collective_compute_overlap"
+        }
+        assert statuses == {"possible_exposed_collective"}  # share >= 0 always meets 0
+        for finding in payload["findings"]:
+            if finding["rule_id"] == "collective_compute_overlap":
+                assert 0 <= finding["comparison"]["value"] <= 1
+
+    comparison = analyze_ranks(out, config=RuleConfig(rank_imbalance_ratio=1.0))
+    assert comparison["world_size"] == 2 and comparison["missing_ranks"] == []
+    assert comparison["compatibility"]["problems"] == []
+    assert [row["coverage"] for row in comparison["steps"]] == ["complete"] * 6
+    assert all(row["ratio"] >= 1.0 for row in comparison["steps"])
+    assert any(
+        row["work_equivalence"] == "configuration and host phases" for row in comparison["steps"]
+    )
+    assert {f["status"] for f in comparison["findings"]} == {"possible_rank_imbalance"}
+    write_ranks(out, comparison)
+    assert load_ranks(out) == comparison
+    assert main(["findings", "--ranks", str(out)]) == 0
+    for rank in range(2):
+        assert load_run(ddp.rank_directory(out, rank)).analysis is not None

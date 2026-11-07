@@ -1,9 +1,10 @@
-"""Summaries of the findings stored in a run's ``analysis.json``.
+"""Summaries of the findings stored in ``analysis.json`` or ``ranks.json``.
 
-Backs ``shardscope findings``. The run is loaded exactly as ``report`` loads it
+Backs ``shardscope findings``. A run is loaded exactly as ``report`` loads it
 (the sidecar is validated against its sources first, so a stale diagnosis is
 refused) and the persisted findings are regrouped per rule: status counts,
-which steps fired, the compared values and the evidence references.
+which steps fired, the compared values and the evidence references. With
+``--ranks`` the same is done for a launch's persisted cross-rank comparison.
 
 Nothing here evaluates a rule, reads a trace for new timing or supplies a
 threshold. To change what a finding says, re-run ``shardscope analyze``.
@@ -12,20 +13,27 @@ threshold. To change what a finding says, re-run ``shardscope analyze``.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 from shardscope.artifacts import RunArtifacts, checked_analysis
 from shardscope.errors import ArtifactError
-from shardscope.rules import LEGACY_RULES, RULES, TRIGGERED_STATUSES, RuleConfig
+from shardscope.rules import LEGACY_RULES, RANK_RULES, RULES, TRIGGERED_STATUSES, RuleConfig
 
-__all__ = ["known_statuses", "render_findings_text", "summarize_findings"]
+__all__ = [
+    "known_statuses",
+    "render_findings_text",
+    "render_rank_findings_text",
+    "summarize_findings",
+    "summarize_rank_findings",
+]
 
-_SPECS = {spec.rule_id: spec for spec in RULES}
+_SPECS = {spec.rule_id: spec for spec in (*RULES, *RANK_RULES)}
 
 
 def known_statuses() -> tuple[str, ...]:
     """Every status any registered rule can emit, for argument validation."""
-    return tuple(sorted({status for spec in RULES for status in spec.statuses}))
+    return tuple(sorted({status for spec in (*RULES, *RANK_RULES) for status in spec.statuses}))
 
 
 def _step_ranges(steps: Iterable[int]) -> str:
@@ -107,14 +115,7 @@ def summarize_findings(
             f"{run.path} has no analysis.json; run 'shardscope analyze --run {run.path} "
             "--threshold KEY=VALUE' first. Findings are read from the persisted sidecar only."
         )
-    unknown = sorted(set(rule_ids) - set(_SPECS))
-    if unknown:
-        raise ArtifactError(f"unknown rule id(s): {', '.join(unknown)}; known: {', '.join(_SPECS)}")
-    unknown = sorted(set(statuses) - set(known_statuses()))
-    if unknown:
-        raise ArtifactError(
-            f"unknown status(es): {', '.join(unknown)}; known: {', '.join(known_statuses())}"
-        )
+    _check_filters(rule_ids, statuses)
     evaluated = list(analysis.get("rules", LEGACY_RULES))
     config = analysis.get("rule_config")
     rule_config = RuleConfig.from_mapping(config) if config is not None else RuleConfig()
@@ -122,41 +123,17 @@ def summarize_findings(
     for finding in analysis["findings"]:
         by_rule.setdefault(finding["rule_id"], []).append(finding)
 
-    rules = []
-    for spec in RULES:
-        if rule_ids and spec.rule_id not in rule_ids:
-            continue
-        findings = by_rule.get(spec.rule_id, [])
-        counts: dict[str, int] = {}
-        for finding in findings:
-            counts[finding["status"]] = counts.get(finding["status"], 0) + 1
-        settings = {
-            item["key"]: getattr(rule_config, item["key"])
-            for item in spec.config
-            if getattr(rule_config, item["key"]) is not None
-        }
-        listed = [f for f in findings if not statuses or f["status"] in statuses]
-        rules.append(
-            {
-                "rule_id": spec.rule_id,
-                "evaluated": spec.rule_id in evaluated,
-                "configured": bool(findings) and findings[0]["status"] != "unconfigured",
-                "config": settings,
-                "granularity": spec.granularity,
-                "description": spec.description,
-                "counts": counts,
-                "triggered_steps": sorted(
-                    {
-                        step
-                        for f in findings
-                        if f["status"] in TRIGGERED_STATUSES
-                        for step in f["steps"]
-                    }
-                ),
-                "next_investigation": spec.next_investigation,
-                "findings": listed,
-            }
+    rules = [
+        _group(
+            spec,
+            by_rule.get(spec.rule_id, []),
+            rule_config,
+            statuses,
+            evaluated=spec.rule_id in evaluated,
         )
+        for spec in RULES
+        if not rule_ids or spec.rule_id in rule_ids
+    ]
     mapped = sum(1 for row in analysis["steps"] if row["boundary"] is not None)
     return {
         "run": str(run.path),
@@ -175,6 +152,148 @@ def summarize_findings(
             "not zero."
         ),
     }
+
+
+def _check_filters(rule_ids: Sequence[str], statuses: Sequence[str]) -> None:
+    unknown = sorted(set(rule_ids) - set(_SPECS))
+    if unknown:
+        raise ArtifactError(f"unknown rule id(s): {', '.join(unknown)}; known: {', '.join(_SPECS)}")
+    unknown = sorted(set(statuses) - set(known_statuses()))
+    if unknown:
+        raise ArtifactError(
+            f"unknown status(es): {', '.join(unknown)}; known: {', '.join(known_statuses())}"
+        )
+
+
+def _group(spec, findings, rule_config, statuses, *, evaluated):
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding["status"]] = counts.get(finding["status"], 0) + 1
+    settings = {
+        item["key"]: getattr(rule_config, item["key"])
+        for item in spec.config
+        if getattr(rule_config, item["key"]) is not None
+    }
+    return {
+        "rule_id": spec.rule_id,
+        "evaluated": evaluated,
+        "configured": bool(findings) and findings[0]["status"] != "unconfigured",
+        "config": settings,
+        "granularity": spec.granularity,
+        "description": spec.description,
+        "counts": counts,
+        "triggered_steps": sorted(
+            {step for f in findings if f["status"] in TRIGGERED_STATUSES for step in f["steps"]}
+        ),
+        "next_investigation": spec.next_investigation,
+        "findings": [f for f in findings if not statuses or f["status"] in statuses],
+    }
+
+
+def summarize_rank_findings(
+    root: str | Path,
+    *,
+    rule_ids: Sequence[str] = (),
+    statuses: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Group a validated ``ranks.json``'s findings per cross-rank rule.
+
+    The comparison is validated against the rank directories first (digests
+    and a full recomputation), exactly as ``summarize_findings`` validates a
+    run's sidecar. Nothing is evaluated here.
+    """
+    from shardscope.ranks import load_ranks
+
+    _check_filters(rule_ids, statuses)
+    payload = load_ranks(root)
+    config = payload.get("rule_config")
+    rule_config = RuleConfig.from_mapping(config) if config is not None else RuleConfig()
+    by_rule: dict[str, list[dict[str, Any]]] = {}
+    for finding in payload["findings"]:
+        by_rule.setdefault(finding["rule_id"], []).append(finding)
+    rules = [
+        _group(spec, by_rule.get(spec.rule_id, []), rule_config, statuses, evaluated=True)
+        for spec in RANK_RULES
+        if not rule_ids or spec.rule_id in rule_ids
+    ]
+    compared = sum(1 for row in payload["steps"] if row["ratio"] is not None)
+    return {
+        "root": str(Path(root)),
+        "world_size": payload["world_size"],
+        "ranks_recorded": [item["rank"] for item in payload["ranks"]],
+        "missing_ranks": payload["missing_ranks"],
+        "compatibility_problems": payload["compatibility"]["problems"],
+        "rules_evaluated": payload["rules"],
+        "rule_config": config,
+        "compared_steps": compared,
+        "total_steps": len(payload["steps"]),
+        "rules": rules,
+        "note": (
+            "Statuses are configured comparisons over each rank's recorded step durations; a "
+            "triggered status says the ranks' step times differ, not which rank caused it, and "
+            "a below_threshold status does not establish balanced work. Durations are compared, "
+            "never timestamps across machines."
+        ),
+    }
+
+
+def render_rank_findings_text(summary: dict[str, Any]) -> str:
+    """Render :func:`summarize_rank_findings` output as plain text."""
+    lines = [
+        f"cross-rank diagnostics for {summary['root']} (ranks.json, world size "
+        f"{summary['world_size']}, ranks recorded {summary['ranks_recorded']}): "
+        f"{summary['compared_steps']} of {summary['total_steps']} training step(s) compared",
+        "rules evaluated: " + ", ".join(summary["rules_evaluated"]),
+    ]
+    config = summary["rule_config"]
+    lines.append(
+        "thresholds: "
+        + (", ".join(f"{k}={_number(v)}" for k, v in config.items()) if config else "none")
+    )
+    if summary["missing_ranks"]:
+        lines.append(f"missing rank directories: {summary['missing_ranks']}")
+    for problem in summary["compatibility_problems"]:
+        lines.append(f"incompatible: {problem}")
+    _render_rule_blocks(lines, summary["rules"], command="shardscope ranks")
+    lines.append("")
+    lines.append(summary["note"])
+    return "\n".join(lines) + "\n"
+
+
+def _render_rule_blocks(lines: list[str], rules: list[dict[str, Any]], *, command: str) -> None:
+    for rule in rules:
+        lines.append("")
+        if not rule["evaluated"]:
+            lines.append(
+                f"{rule['rule_id']}: not evaluated (this analysis.json predates the rule; "
+                "re-run shardscope analyze --overwrite to evaluate it)"
+            )
+            continue
+        if not rule["configured"]:
+            keys = ", ".join(item["key"] for item in _SPECS[rule["rule_id"]].config)
+            lines.append(f"{rule['rule_id']}: unconfigured (set --threshold {keys} on {command})")
+            continue
+        settings = ", ".join(f"{k}={_number(v)}" for k, v in rule["config"].items())
+        counts = ", ".join(f"{n} {status}" for status, n in sorted(rule["counts"].items()))
+        lines.append(f"{rule['rule_id']} [{settings}]: {counts}")
+        by_status: dict[str, list[dict[str, Any]]] = {}
+        for finding in rule["findings"]:
+            by_status.setdefault(finding["status"], []).append(finding)
+        for status in sorted(by_status, key=lambda s: (s not in TRIGGERED_STATUSES, s)):
+            findings = by_status[status]
+            steps = [step for f in findings for step in f["steps"]]
+            lines.append(f"  {status}: steps {_step_ranges(steps)}")
+            if status in TRIGGERED_STATUSES:
+                for finding in findings:
+                    lines.append(
+                        f"    steps {_step_ranges(finding['steps'])}: {_compared(finding)}; "
+                        f"evidence {_refs(finding['evidence'])}"
+                    )
+                lines.append(f"    {findings[0]['interpretation']}")
+            else:
+                reasons = list(dict.fromkeys(f["interpretation"] for f in findings))
+                more = " (and other reasons)" if len(reasons) > 1 else ""
+                lines.append(f"    {reasons[0]}{more}")
 
 
 def render_findings_text(summary: dict[str, Any]) -> str:
@@ -199,41 +318,7 @@ def render_findings_text(summary: dict[str, Any]) -> str:
         "thresholds: "
         + (", ".join(f"{k}={_number(v)}" for k, v in config.items()) if config else "none")
     )
-    for rule in summary["rules"]:
-        lines.append("")
-        if not rule["evaluated"]:
-            lines.append(
-                f"{rule['rule_id']}: not evaluated (this analysis.json predates the rule; "
-                "re-run shardscope analyze --overwrite to evaluate it)"
-            )
-            continue
-        if not rule["configured"]:
-            keys = ", ".join(item["key"] for item in _SPECS[rule["rule_id"]].config)
-            lines.append(
-                f"{rule['rule_id']}: unconfigured (set --threshold {keys} on shardscope analyze)"
-            )
-            continue
-        settings = ", ".join(f"{k}={_number(v)}" for k, v in rule["config"].items())
-        counts = ", ".join(f"{n} {status}" for status, n in sorted(rule["counts"].items()))
-        lines.append(f"{rule['rule_id']} [{settings}]: {counts}")
-        by_status: dict[str, list[dict[str, Any]]] = {}
-        for finding in rule["findings"]:
-            by_status.setdefault(finding["status"], []).append(finding)
-        for status in sorted(by_status, key=lambda s: (s not in TRIGGERED_STATUSES, s)):
-            findings = by_status[status]
-            steps = [step for f in findings for step in f["steps"]]
-            lines.append(f"  {status}: steps {_step_ranges(steps)}")
-            if status in TRIGGERED_STATUSES:
-                for finding in findings:
-                    lines.append(
-                        f"    steps {_step_ranges(finding['steps'])}: {_compared(finding)}; "
-                        f"evidence {_refs(finding['evidence'])}"
-                    )
-                lines.append(f"    {findings[0]['interpretation']}")
-            else:
-                reasons = list(dict.fromkeys(f["interpretation"] for f in findings))
-                more = " (and other reasons)" if len(reasons) > 1 else ""
-                lines.append(f"    {reasons[0]}{more}")
+    _render_rule_blocks(lines, summary["rules"], command="shardscope analyze")
     lines.append("")
     lines.append(summary["note"])
     lines.append(
