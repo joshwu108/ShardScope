@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from shardscope.artifacts import ENVIRONMENT_JSON, STEPS_CSV, SUMMARY_JSON, RunArtifacts
+from shardscope.attribution import ATTRIBUTED_KERNEL_METRIC
 from shardscope.availability import NOT_OBSERVED, NOT_RECORDED, RECORDED, field_statuses
 from shardscope.errors import ReportError
+from shardscope.parse import summarize_indices
 
 __all__ = ["DEFAULT_MAX_ROWS", "render_html"]
 
@@ -339,8 +341,9 @@ def _analysis_section(run: RunArtifacts) -> str:
             ),
             rows,
         ),
-        "<h2>Configured diagnostic comparisons</h2>",
     ]
+    lines.extend(_attribution_section(analysis, evidence_links))
+    lines.append("<h2>Configured diagnostic comparisons</h2>")
     for finding in analysis["findings"]:
         lines.append(
             f"<p>{_esc(finding['rule_id'])}: {_esc(finding['status'])}; "
@@ -368,3 +371,119 @@ def _analysis_section(run: RunArtifacts) -> str:
         )
     lines.append("</ul>")
     return "\n".join(lines)
+
+
+def _attribution_section(analysis: Mapping[str, Any], evidence_links) -> list[str]:
+    """Persisted kernel attribution: coverage per trace, timing per step.
+
+    Everything shown is read from ``analysis.json``; counts, unions and
+    outcomes are the persisted ones. Unmatched and ambiguous kernels are
+    summarized per reason with representative original indices.
+    """
+    block = analysis.get("kernel_attribution")
+    lines = ["<h2>Kernel attribution</h2>"]
+    if block is None:
+        lines.append(
+            '<p class="sub">This analysis.json predates kernel attribution; no kernel event is '
+            "tied to a step and no attributed kernel time is shown.</p>"
+        )
+        return lines
+    lines.append(f"<p>{_esc(block['scope'])}. Supported launch forms: ")
+    lines[-1] += ", ".join(f"<code>{_esc(x)}</code>" for x in block["supported_launch_events"])
+    lines[-1] += (
+        f"; kernel category <code>{_esc(block['kernel_category'])}</code>. A launch is tied to "
+        "a step only when it lies entirely inside that step's mapped host boundary on the same "
+        "process and thread; launches on other host threads are listed, not guessed.</p>"
+    )
+    trace_rows = []
+    outcome_rows = []
+    for name in sorted(block["traces"]):
+        result = block["traces"][name]
+        kernels, launches = result["kernel_events"], result["launch_events"]
+        trace_rows.append(
+            f'<tr><td class="mono">{_esc(name)}</td>'
+            f'<td class="num">{kernels["total"]}</td>'
+            f'<td class="num">{kernels["attributed"]}</td>'
+            f'<td class="num">{kernels["unmatched"]}</td>'
+            f'<td class="num">{kernels["ambiguous"]}</td>'
+            f'<td class="num">{launches["attributed"]}</td>'
+            f'<td class="num">{launches["outside_mapped_step"]}</td>'
+            f'<td class="num">{launches["ambiguous_boundary"]}</td>'
+            f'<td class="num">{launches["duplicate_correlation"]}</td>'
+            f'<td class="num">{launches["missing_correlation"]}</td></tr>'
+        )
+        by_kind: dict[tuple[str, str], list[int]] = {}
+        for label in ("unmatched", "ambiguous"):
+            for record in result[label]:
+                by_kind.setdefault((label, record["kind"]), []).append(record["kernel_event_index"])
+        for (label, kind), indices in sorted(by_kind.items()):
+            outcome_rows.append(
+                f'<tr><td class="mono">{_esc(name)}</td><td>{_esc(label)}</td>'
+                f'<td class="mono">{_esc(kind)}</td>'
+                f"<td>{_esc(summarize_indices(indices))}</td></tr>"
+            )
+    lines.append(
+        _table(
+            (
+                "trace",
+                "kernel events",
+                "attributed",
+                "unmatched",
+                "ambiguous",
+                "launches attributed",
+                "launches outside mapped steps",
+                "launches in ambiguous boundaries",
+                "duplicate correlation ids",
+                "launches without correlation",
+            ),
+            trace_rows,
+        )
+    )
+    step_rows = []
+    for step in analysis["steps"]:
+        metric = step["measurements"].get(ATTRIBUTED_KERNEL_METRIC)
+        if metric is None or step["boundary"] is None:
+            continue
+        coverage = metric.get("coverage", {})
+        value = "unavailable" if metric["value_ms"] is None else _cell(metric["value_ms"])
+        step_rows.append(
+            f'<tr><td class="num">{step["training_step"]}</td>'
+            f'<td class="mono">{_esc(step["boundary"]["file"])}</td>'
+            f"<td>{_esc(_cell(coverage.get('devices')))}</td>"
+            f'<td class="num">{_esc(value)}</td><td>{_esc(metric["status"])}</td>'
+            f'<td class="num">{_esc(_cell(coverage.get("step_kernel_events")))}</td>'
+            f'<td class="num">{_esc(_cell(coverage.get("step_launch_events")))}</td>'
+            f"<td>{_esc(_cell(coverage.get('completeness')))}; "
+            f"{_esc(_cell(coverage.get('trace_attributed_kernel_events')))}/"
+            f"{_esc(_cell(coverage.get('trace_kernel_events')))} kernel events in trace</td>"
+            f"<td>{evidence_links(metric['evidence'])}</td></tr>"
+        )
+    lines.append(
+        '<p class="sub">Per mapped step: the interval union of attributed kernel ranges on one '
+        "device. A partial coverage means kernels in the same trace could not be tied to any "
+        "step, so the figure is a lower bound on attributed kernel execution, not a complete "
+        "compute measurement.</p>"
+    )
+    lines.append(
+        _table(
+            (
+                "training step",
+                "trace",
+                "device",
+                "attributed kernel ms",
+                "availability",
+                "kernel events",
+                "launch events",
+                "coverage",
+                "kernel evidence",
+            ),
+            step_rows,
+        )
+    )
+    if outcome_rows:
+        lines.append(
+            '<p class="sub">Kernel events that were not attributed, by outcome and reason, with '
+            "representative original event indices; each record is in analysis.json.</p>"
+        )
+        lines.append(_table(("trace", "outcome", "reason", "kernel events"), outcome_rows))
+    return lines

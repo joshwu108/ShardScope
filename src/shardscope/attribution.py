@@ -46,6 +46,7 @@ __all__ = [
     "SUPPORTED_LAUNCHES",
     "attribute_trace",
     "attribute_traces",
+    "classify_kernels",
     "correlation_id",
     "is_host_api_event",
     "is_kernel_event",
@@ -135,13 +136,14 @@ def _thread(event: dict[str, Any]) -> str:
     return f"pid={event.get('pid')}; tid={event.get('tid')}"
 
 
-def attribute_trace(trace: Trace, boundaries: list[tuple[int, int]]) -> dict[str, Any]:
-    """Attribute one trace's kernels to the mapped boundaries it contains.
+def classify_kernels(trace: Trace, boundaries: list[tuple[int, int]]) -> dict[str, Any]:
+    """Resolve every kernel and launch in one trace without timing anything.
 
     ``boundaries`` holds ``(training_step, boundary_event_index)`` pairs that
     the caller has already validated against the explicit step map. The result
-    is plain JSON data (lists, dicts, ints, floats, strings) so a persisted
-    copy compares equal to a recomputation.
+    is plain JSON data (lists, dicts, ints, strings) so a persisted copy
+    compares equal to a recomputation; validation re-derives exactly this
+    classification and never re-times a kernel.
     """
     events = trace.events
     by_step = dict(boundaries)
@@ -197,7 +199,6 @@ def attribute_trace(trace: Trace, boundaries: list[tuple[int, int]]) -> dict[str
     attributed: list[dict[str, Any]] = []
     unmatched: list[dict[str, Any]] = []
     ambiguous: list[dict[str, Any]] = []
-    per_step: dict[int, dict[int, list[tuple[int, float, float, Any]]]] = {}
     for index, event in enumerate(events):
         if not is_kernel_event(event):
             continue
@@ -297,39 +298,6 @@ def attribute_trace(trace: Trace, boundaries: list[tuple[int, int]]) -> dict[str
                 "stream": stream,
             }
         )
-        per_step.setdefault(step, {}).setdefault(device, []).append(
-            (index, event["ts"], event["ts"] + event["dur"], stream)
-        )
-
-    # 4. Per-step, per-device interval unions. Devices are never combined.
-    steps = []
-    for step in sorted(per_step):
-        per_device = []
-        for device in sorted(per_step[step]):
-            items = per_step[step][device]
-            per_device.append(
-                {
-                    "device": device,
-                    "attributed_kernel_ms": interval_union_us((s, e) for _, s, e, _ in items)
-                    / 1000,
-                    "kernel_event_indices": [i for i, _, _, _ in items],
-                    "launch_event_indices": sorted(
-                        {
-                            r["launch_event_index"]
-                            for r in attributed
-                            if r["training_step"] == step and r["device"] == device
-                        }
-                    ),
-                    "streams": sorted({str(s) for _, _, _, s in items}),
-                }
-            )
-        steps.append(
-            {
-                "training_step": step,
-                "boundary_event_index": by_step[step],
-                "per_device": per_device,
-            }
-        )
 
     total = len(attributed) + len(unmatched) + len(ambiguous)
     return {
@@ -349,8 +317,47 @@ def attribute_trace(trace: Trace, boundaries: list[tuple[int, int]]) -> dict[str
         "attributed": attributed,
         "unmatched": unmatched,
         "ambiguous": ambiguous,
-        "steps": steps,
     }
+
+
+def _step_groups(classified: dict[str, Any]) -> dict[int, dict[int, list[dict[str, Any]]]]:
+    """Attributed records grouped by training step, then device, in trace order."""
+    groups: dict[int, dict[int, list[dict[str, Any]]]] = {}
+    for record in classified["attributed"]:
+        groups.setdefault(record["training_step"], {}).setdefault(record["device"], []).append(
+            record
+        )
+    return groups
+
+
+def attribute_trace(trace: Trace, boundaries: list[tuple[int, int]]) -> dict[str, Any]:
+    """Classify one trace's kernels, then union the attributed ranges per step and device.
+
+    Devices are never combined: each ``per_device`` entry is one device clock.
+    """
+    classified = classify_kernels(trace, boundaries)
+    by_step = dict(boundaries)
+    steps = []
+    for step, devices in sorted(_step_groups(classified).items()):
+        per_device = []
+        for device, records in sorted(devices.items()):
+            kernels = [trace.events[r["kernel_event_index"]] for r in records]
+            per_device.append(
+                {
+                    "device": device,
+                    "attributed_kernel_ms": interval_union_us(
+                        (k["ts"], k["ts"] + k["dur"]) for k in kernels
+                    )
+                    / 1000,
+                    "kernel_event_indices": [r["kernel_event_index"] for r in records],
+                    "launch_event_indices": sorted({r["launch_event_index"] for r in records}),
+                    "streams": sorted({str(r["stream"]) for r in records}),
+                }
+            )
+        steps.append(
+            {"training_step": step, "boundary_event_index": by_step[step], "per_device": per_device}
+        )
+    return {**classified, "steps": steps}
 
 
 def _trace_warnings(name: str, result: dict[str, Any], trace: Trace) -> list[str]:
@@ -642,9 +649,28 @@ def validate_attribution(
                     )
         trace = load_trace(name)
         if trace is not None:
+            expected = classify_kernels(trace, boundaries.get(name, []))
             _require(
-                attribute_trace(trace, boundaries.get(name, [])) == result,
+                {key: result[key] for key in expected} == expected,
                 f"{name}: stored attribution disagrees with the trace and step map",
+            )
+            grouped = _step_groups(expected)
+            stored = {
+                entry["training_step"]: {device["device"]: device for device in entry["per_device"]}
+                for entry in result["steps"]
+            }
+            _require(
+                stored.keys() == grouped.keys()
+                and all(stored[step].keys() == grouped[step].keys() for step in grouped)
+                and all(
+                    stored[step][device]["kernel_event_indices"]
+                    == [r["kernel_event_index"] for r in records]
+                    and stored[step][device]["launch_event_indices"]
+                    == sorted({r["launch_event_index"] for r in records})
+                    for step, devices in grouped.items()
+                    for device, records in devices.items()
+                ),
+                f"{name}: per-step kernel groups disagree with the attributed records",
             )
 
     # Each step measurement must be the one the block supports.

@@ -38,7 +38,13 @@ from shardscope.parse import (
     parse_trace,
     read_json_bytes,
 )
-from shardscope.rules import RULE_ID, RuleConfig, evaluate_rules
+from shardscope.rules import (
+    LEGACY_RULES,
+    RULE_IDS,
+    RuleConfig,
+    evaluate_rules,
+    parse_threshold,
+)
 
 ANALYSIS_JSON = "analysis.json"
 
@@ -226,7 +232,8 @@ def analyze_run(
         "rank": rank,
         "source": sources,
         "steps": steps,
-        "findings": evaluate_rules(steps, config),
+        "rules": list(RULE_IDS),
+        "findings": evaluate_rules(steps, config, rules=RULE_IDS),
         "kernel_attribution": attribution,
         "warnings": warnings,
         "rule_config": config.to_dict() if config else None,
@@ -503,19 +510,26 @@ def validate_analysis(
     if mapped is not None:
         _require(mapped.keys() <= seen, "step map contains training steps absent from analysis")
     config = payload.get("rule_config")
+    rule_config = None
     if config is not None:
-        _require(
-            isinstance(config, dict) and set(config) == {"loader_wait_threshold_ms"},
-            "invalid rule_config",
-        )
-        RuleConfig(**config)
+        _require(isinstance(config, dict) and bool(config), "invalid rule_config")
+        rule_config = RuleConfig.from_mapping(config)
+    # Sidecars written before the rule registry carry no ``rules`` key and were
+    # evaluated with the single legacy rule; they keep loading unchanged.
+    rules = payload.get("rules", list(LEGACY_RULES))
+    _require(
+        isinstance(rules, list)
+        and all(isinstance(rule, str) and rule in RULE_IDS for rule in rules)
+        and len(set(rules)) == len(rules),
+        f"rules must list distinct known rule ids from: {', '.join(RULE_IDS)}",
+    )
     findings = payload.get("findings")
     _require(isinstance(findings, list), "findings must be array")
     # This checks persisted comparisons against their recorded inputs; it never
     # estimates a missing measurement or supplies configuration.
     _require(
-        findings == evaluate_rules(items, RuleConfig(**config) if config else None),
-        f"{RULE_ID}: findings disagree with measurements/configuration",
+        findings == evaluate_rules(items, rule_config, rules=rules),
+        f"{', '.join(rules)}: findings disagree with measurements/configuration",
     )
     for finding in findings:
         references(finding["evidence"])
@@ -610,8 +624,42 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--trace", action="append", help="trace filename within run; repeat for cycles"
     )
-    parser.add_argument("--loader-wait-threshold-ms", type=float)
+    parser.add_argument(
+        "--loader-wait-threshold-ms",
+        type=float,
+        help="enable host_loader_wait; same as --threshold loader_wait_threshold_ms=MS",
+    )
+    parser.add_argument(
+        "--threshold",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "configure one rule threshold; repeat for several. Keys and ranges: "
+            "shardscope rules. A rule with no threshold reports unconfigured"
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
+
+
+def rule_config_from_arguments(args: argparse.Namespace) -> RuleConfig | None:
+    """Combine the legacy loader-wait flag with ``--threshold KEY=VALUE`` items.
+
+    Returns ``None`` when nothing was configured, so the sidecar records
+    ``rule_config: null`` and every rule reports ``unconfigured``. Supplying the
+    same key twice with different values is a mistake, not a precedence rule.
+    """
+    values: dict[str, int | float] = {}
+    items = list(getattr(args, "threshold", None) or [])
+    if getattr(args, "loader_wait_threshold_ms", None) is not None:
+        values["loader_wait_threshold_ms"] = args.loader_wait_threshold_ms
+    for item in items:
+        key, value = parse_threshold(item)
+        if key in values and values[key] != value:
+            raise ArtifactError(
+                f"threshold {key} given twice with different values ({values[key]!r} and {value!r})"
+            )
+        values[key] = value
+    return RuleConfig(**values) if values else None
 
 
 def run_arguments(args: argparse.Namespace) -> int:
@@ -619,11 +667,7 @@ def run_arguments(args: argparse.Namespace) -> int:
     try:
         if (args.run / ANALYSIS_JSON).exists() and not args.overwrite:
             raise ArtifactError(f"{args.run / ANALYSIS_JSON} exists; pass --overwrite")
-        config = (
-            RuleConfig(args.loader_wait_threshold_ms)
-            if args.loader_wait_threshold_ms is not None
-            else None
-        )
+        config = rule_config_from_arguments(args)
         payload = analyze_run(
             args.run,
             rank=args.rank,

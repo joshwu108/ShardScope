@@ -6,6 +6,8 @@ artifacts, and ``report`` renders HTML, JSON or CSV without adding measurements.
 ``profile`` captures diagnostic traces; ``bench`` measures unprofiled windows
 and ``compare`` reports descriptive differences with significance unconfigured.
 ``analyze`` persists offline host-range analysis using explicit step mappings.
+``rules`` lists the diagnostic rules ``analyze`` can evaluate and their evidence
+requirements; ``findings`` shows the findings a persisted analysis.json holds.
 Diagnostic and throughput measurements remain separate commands.
 Memory sweeps are outside the current command interface.
 """
@@ -151,6 +153,62 @@ def build_parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze", help="analyze saved traces with explicit step mappings")
     add_arguments(analyze)
 
+    rules_cmd = sub.add_parser(
+        "rules",
+        help="list the diagnostic rules analyze can evaluate and their evidence requirements",
+        description=(
+            "Describe every diagnostic rule: its stable id, the persisted measurements it "
+            "needs, the thresholds it takes (with units and ranges), the statuses it can "
+            "emit, and what to look at next. Thresholds are caller configuration; nothing "
+            "here is a calibrated default. Reads no run and writes nothing."
+        ),
+    )
+    rules_cmd.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default: text)",
+    )
+
+    findings_cmd = sub.add_parser(
+        "findings",
+        help="show the diagnostic findings a run's analysis.json already holds",
+        description=(
+            "Read a run and its persisted analysis.json (validated against its sources, "
+            "as 'report' does) and summarize the findings per rule: status counts, the "
+            "steps that fired, the compared values and the evidence references. Evaluates "
+            "no rule and reads no trace for new timing; exit 2 when the run or its "
+            "sidecar will not load, 0 otherwise, whatever the findings say."
+        ),
+    )
+    findings_cmd.add_argument(
+        "--run",
+        metavar="DIR",
+        type=Path,
+        required=True,
+        help="run directory holding steps.csv, environment.json and analysis.json",
+    )
+    findings_cmd.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default: text); json is the scripting interface",
+    )
+    findings_cmd.add_argument(
+        "--rule",
+        action="append",
+        metavar="RULE_ID",
+        default=None,
+        help="only this rule; repeat for several (ids: shardscope rules)",
+    )
+    findings_cmd.add_argument(
+        "--status",
+        action="append",
+        metavar="STATUS",
+        default=None,
+        help="only findings with this status; repeat for several. Counts stay complete",
+    )
+
     return parser
 
 
@@ -193,6 +251,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         from shardscope.analysis import run_arguments
 
         return run_arguments(args)
+
+    if args.command == "rules":
+        return _run_rules(args)
+
+    if args.command == "findings":
+        return _run_findings(args)
 
     if args.command == "profile":
         from shardscope.capture import profile_run
@@ -253,6 +317,54 @@ def _run_validate(args: argparse.Namespace) -> int:
     if not result.ok:
         raise ValidationError(result.errors[0])
     sys.stdout.write(result.to_text())
+    return 0
+
+
+def _run_rules(args: argparse.Namespace) -> int:
+    """Print the rule registry; the same text a finding's rule_id refers to."""
+    import json
+
+    from shardscope.rules import describe_rules
+
+    rules = describe_rules()
+    if args.format == "json":
+        print(json.dumps({"rules": rules}, indent=2, sort_keys=True))
+        return 0
+    lines = [
+        "diagnostic rules (evaluated by 'shardscope analyze'; thresholds are caller "
+        "configuration, never calibrated defaults)"
+    ]
+    for rule in rules:
+        lines.append("")
+        lines.append(f"{rule['rule_id']}  ({rule['granularity']})")
+        lines.append(f"  {rule['description']}")
+        lines.append(f"  requires        {', '.join(rule['required_measurements'])}")
+        lines.append(f"  scope           {rule['scope']}")
+        for item in rule["config"]:
+            lines.append(
+                f"  --threshold     {item['key']}=<{item['type']}>  [{item['unit']}; "
+                f"{item['range']}]  {item['compares']}"
+            )
+        statuses = "; ".join(f"{k}: {v}" for k, v in rule["statuses"].items())
+        lines.append(f"  statuses        {statuses}")
+        lines.append(f"  interpretation  {rule['interpretation']}")
+        lines.append(f"  next            {rule['next_investigation']}")
+    print("\n".join(lines))
+    return 0
+
+
+def _run_findings(args: argparse.Namespace) -> int:
+    """Summarize persisted findings; loading failures exit 2 like 'report'."""
+    import json
+
+    from shardscope.findings import render_findings_text, summarize_findings
+
+    run = load_run(args.run)
+    summary = summarize_findings(run, rule_ids=args.rule or (), statuses=args.status or ())
+    if args.format == "json":
+        sys.stdout.write(json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        return 0
+    sys.stdout.write(render_findings_text(summary))
     return 0
 
 

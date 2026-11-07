@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from shardscope.attribution import ATTRIBUTED_KERNEL_METRIC
 from shardscope.artifacts import (
     ENVIRONMENT_JSON,
     STEPS_CSV,
@@ -21,7 +20,9 @@ from shardscope.artifacts import (
     RunArtifacts,
     checked_analysis,
 )
+from shardscope.attribution import ATTRIBUTED_KERNEL_METRIC
 from shardscope.env import NOT_OBSERVED, distributed_capable
+from shardscope.rules import TRIGGERED_STATUSES
 
 __all__ = [
     "NOT_OBSERVED",
@@ -140,15 +141,16 @@ def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
         f"steps.csv durations for explicit rank {analysis['rank']}; "
         "no cross-machine clock alignment.",
     )
-    possible = any(f["status"] == "possible_input_wait" for f in analysis["findings"])
+    possible = any(f["status"] in TRIGGERED_STATUSES for f in analysis["findings"])
     statuses["suspected_bottleneck"] = FieldStatus(
         "suspected_bottleneck",
         RECORDED if possible else NOT_RECORDED,
         (
-            "Host loader-wait diagnostic is unconfigured; no threshold was supplied."
+            "Diagnostic rules are unconfigured; no threshold was supplied."
             if analysis["rule_config"] is None
-            else "Persisted configured host-wait comparisons; possible input waiting "
-            "does not establish GPU starvation. No calibrated confidence or confirmed root cause."
+            else "Persisted configured comparisons over host ranges; a triggered status "
+            "(for example possible input waiting) does not establish GPU starvation. "
+            "No calibrated confidence or confirmed root cause. See: shardscope findings."
         ),
     )
     return tuple(statuses.values())

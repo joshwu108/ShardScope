@@ -15,6 +15,27 @@ Design policy (see planning/ for rationale):
 
 from shardscope.env import RunEnvironment, capture_environment
 
-__all__ = ["RunEnvironment", "capture_environment", "__version__"]
+__all__ = [
+    "RunEnvironment",
+    "capture_environment",
+    "describe_module",
+    "profile_loop",
+    "__version__",
+]
+
+#: Loop-integration entry points live in ``shardscope.loop``, which imports
+#: torch. They are resolved on first use so that importing the package, and
+#: the CLI commands that only read artifacts, stay torch-free.
+_LAZY = {"profile_loop": "shardscope.loop", "describe_module": "shardscope.loop"}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY.get(name)
+    if module_name is None:
+        raise AttributeError(f"module 'shardscope' has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(module_name), name)
+
 
 __version__ = "0.0.1"
