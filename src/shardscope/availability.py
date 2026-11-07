@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from shardscope.attribution import ATTRIBUTED_KERNEL_METRIC
 from shardscope.artifacts import (
     ENVIRONMENT_JSON,
     STEPS_CSV,
@@ -87,13 +88,15 @@ def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
                 NOT_OBSERVED if all(v["status"] == NOT_OBSERVED for v in values) else NOT_RECORDED
             )
         )
+        if name == ATTRIBUTED_KERNEL_METRIC:
+            kind = _attribution_coverage(values)
+        elif name.startswith("host_"):
+            kind = "host ranges, not GPU execution or idle time. "
+        else:
+            kind = "device timing requires validated device evidence. "
         detail = (
             f"analysis.json: {recorded}/{len(values)} step(s) recorded in ms; "
-            + (
-                "host ranges, not GPU execution or idle time. "
-                if name.startswith("host_")
-                else "device timing requires validated device evidence. "
-            )
+            + kind
             + " ".join(dict.fromkeys(v["reason"] for v in values))
         )
         statuses[name] = FieldStatus(name, state, detail)
@@ -108,6 +111,17 @@ def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
             statuses[old] = FieldStatus(
                 old, value.state, f"See explicit {explicit}: {value.detail}"
             )
+    if ATTRIBUTED_KERNEL_METRIC in statuses and "gpu_activity" in statuses:
+        # Total busy time stays unavailable; the attributed subset is a
+        # separate, partial field and is pointed to rather than substituted.
+        current = statuses["gpu_activity"]
+        statuses["gpu_activity"] = FieldStatus(
+            current.field,
+            current.state,
+            current.detail
+            + f" A partial per-step kernel figure exists as {ATTRIBUTED_KERNEL_METRIC}; "
+            "it is not total device busy time.",
+        )
     refs = [
         ref
         for row in analysis["steps"]
@@ -138,6 +152,28 @@ def field_statuses(run: RunArtifacts) -> tuple[FieldStatus, ...]:
         ),
     )
     return tuple(statuses.values())
+
+
+def _attribution_coverage(values: list[dict[str, Any]]) -> str:
+    """Spell attribution coverage from the persisted per-step coverage blocks."""
+    by_trace: dict[str, tuple[int, int]] = {}
+    for value in values:
+        coverage = value.get("coverage")
+        scope = value.get("scope", "")
+        trace = next((part[6:] for part in scope.split("; ") if part.startswith("trace=")), None)
+        if isinstance(coverage, dict) and trace is not None:
+            by_trace[trace] = (
+                coverage.get("trace_attributed_kernel_events", 0),
+                coverage.get("trace_kernel_events", 0),
+            )
+    attributed = sum(a for a, _ in by_trace.values())
+    total = sum(t for _, t in by_trace.values())
+    return (
+        "attributed kernel time: per-device interval union of kernel ranges tied to a step by "
+        "host launch correlation; not utilization, step latency or total device busy time. "
+        f"Coverage: {attributed}/{total} kernel event(s) attributed across "
+        f"{len(by_trace)} analyzed trace(s). "
+    )
 
 
 def _step_time_ms(run: RunArtifacts) -> FieldStatus:

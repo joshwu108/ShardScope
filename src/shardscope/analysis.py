@@ -17,6 +17,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from shardscope.attribution import (
+    ATTRIBUTED_KERNEL_METRIC,
+    ATTRIBUTION_BASIS,
+    attribute_traces,
+    is_kernel_event,
+    validate_attribution,
+)
 from shardscope.errors import ArtifactError
 from shardscope.parse import (
     DEVICE_METRICS,
@@ -185,7 +192,9 @@ def analyze_run(
         mappings = ()
     unavailable = {}
     if run.environment.get("cuda_available") is False or run.environment.get("device_count") == 0:
-        unavailable = dict.fromkeys(DEVICE_METRICS, "recorded environment has no CUDA device")
+        unavailable = dict.fromkeys(
+            (*DEVICE_METRICS, ATTRIBUTED_KERNEL_METRIC), "recorded environment has no CUDA device"
+        )
     if all(row.data_residency == "device" for row in run.steps):
         unavailable["device_h2d_ms"] = "recorded data_residency=device; no per-step batch transfer"
     count = run.environment.get("device_count")
@@ -205,6 +214,12 @@ def analyze_run(
             metrics[metric] = measurement(None, reason=reason, status="not_observed")
         steps.append({"training_step": step, "boundary": None, "measurements": metrics})
     steps.sort(key=lambda item: item["training_step"])
+    # Kernel attribution runs after host analysis so it can only use validated
+    # boundaries; it adds device_attributed_kernel_ms to every step row.
+    attribution, attribution_warnings = attribute_traces(
+        traces, steps, rank=rank, unavailable=unavailable.get(ATTRIBUTED_KERNEL_METRIC)
+    )
+    warnings.extend(attribution_warnings)
     warnings.append("thresholds are caller configuration, not hardware-calibrated defaults")
     payload = {
         "schema_version": 1,
@@ -212,6 +227,7 @@ def analyze_run(
         "source": sources,
         "steps": steps,
         "findings": evaluate_rules(steps, config),
+        "kernel_attribution": attribution,
         "warnings": warnings,
         "rule_config": config.to_dict() if config else None,
         "mapping_file": step_map_file,
@@ -401,8 +417,11 @@ def validate_analysis(
             )
         metrics = row.get("measurements")
         _require(isinstance(metrics, dict), "measurements must be object")
+        # Sidecars written before kernel attribution existed lack the
+        # attributed-kernel metric; they still load, and never gain a value.
+        required = set(HOST_PHASES.values()) | set(DEVICE_METRICS)
         _require(
-            set(HOST_PHASES.values()) | set(DEVICE_METRICS) == metrics.keys(),
+            required <= metrics.keys() <= required | {ATTRIBUTED_KERNEL_METRIC},
             "missing or unsupported measurement fields",
         )
         for name, metric in metrics.items():
@@ -454,10 +473,23 @@ def validate_analysis(
                             f"{name}: evidence is outside its host boundary",
                         )
                 if name in DEVICE_METRICS:
-                    # No validated device attribution implementation exists yet.
+                    # Complete device activity metrics have no validated
+                    # attribution implementation; only correlated kernel
+                    # ranges are attributed, under their own metric.
                     _require(
                         False, f"{name}: recorded device attribution unsupported by this reader"
                     )
+                if name == ATTRIBUTED_KERNEL_METRIC:
+                    _require(basis == ATTRIBUTION_BASIS, f"{name}: needs {ATTRIBUTION_BASIS} basis")
+                    _require(
+                        all(ref["file"] == boundary_ref["file"] for ref in metric["evidence"]),
+                        f"{name}: evidence must come from the step's own trace",
+                    )
+                    for event in events:
+                        _require(
+                            event is None or is_kernel_event(event),
+                            f"{name}: evidence is not a device kernel event",
+                        )
             else:
                 _require(
                     value is None and basis is None and not events and bool(metric["reason"]),
@@ -487,6 +519,32 @@ def validate_analysis(
     )
     for finding in findings:
         references(finding["evidence"])
+
+    # Kernel attribution relationships: every attributed kernel must resolve,
+    # through its launch, to the boundary this sidecar assigns to its step.
+    # With a source directory the block is recomputed from the trace bytes.
+    boundaries: dict[str, list[tuple[int, int]]] = {}
+    for row in items:
+        if row["boundary"] is not None:
+            boundaries.setdefault(row["boundary"]["file"], []).append(
+                (row["training_step"], row["boundary"]["event_index"])
+            )
+    trace_names = {
+        name
+        for name in source
+        if name not in ("steps.csv", "environment.json", "summary.json", mapping)
+    }
+
+    def load_trace(name):
+        if directory is None:
+            return None
+        if name not in traces:
+            traces[name] = parse_trace(directory / name)
+        return traces[name]
+
+    validate_attribution(
+        payload, trace_names=trace_names, boundaries=boundaries, load_trace=load_trace
+    )
     return payload
 
 

@@ -204,6 +204,19 @@ HOST_PHASES = {
 }
 DEVICE_METRICS = ("device_h2d_ms", "device_compute_ms", "device_collective_ms", "device_busy_ms")
 
+#: Why each device metric stays unavailable when the environment could have
+#: produced it. Only correlated kernel ranges are attributed, and that subset
+#: is published separately as ``device_attributed_kernel_ms``; none of these
+#: four complete-activity metrics can be derived from it.
+DEVICE_METRIC_REASONS = {
+    "device_compute_ms": (
+        "complete per-step device compute time is not measured; "
+        "device_attributed_kernel_ms carries only the kernel ranges attributed through "
+        "host launch correlation"
+    ),
+}
+DEFAULT_DEVICE_REASON = "no validated device-to-step correlation or activity classification"
+
 
 @dataclass(frozen=True)
 class StepMapping:
@@ -254,7 +267,7 @@ def is_step_boundary(event: dict[str, Any]) -> bool:
     )
 
 
-def _contains(boundary: dict[str, Any], event: dict[str, Any]) -> bool:
+def contains_range(boundary: dict[str, Any], event: dict[str, Any]) -> bool:
     """Same host thread and the whole range inside the boundary; no slack."""
     return (
         event["pid"] == boundary["pid"]
@@ -282,7 +295,7 @@ def identity_step(trace: Trace, boundary_index: int) -> int | None:
             event.get("ph") != "X"
             or not name.startswith(IDENTITY_PREFIX)
             or is_device_annotation(event)
-            or not _contains(boundary, event)
+            or not contains_range(boundary, event)
         ):
             continue
         suffix = name[len(IDENTITY_PREFIX) :]
@@ -386,7 +399,7 @@ def analyze_traces(
             elif event["ph"] != "X":
                 unsupported.setdefault(marker, []).append((index, event["ph"]))
             else:
-                owners = [m for m, _, b, _ in local if _contains(b, event)]
+                owners = [m for m, _, b, _ in local if contains_range(b, event)]
                 host.append((index, event, owners))
         classified[trace.path.name] = {"device": device, "unsupported": unsupported, "host": host}
 
@@ -442,8 +455,7 @@ def analyze_traces(
             metrics[metric] = measurement(
                 None,
                 status="not_observed" if reason else "not_recorded",
-                reason=reason
-                or "no validated device-to-step correlation or activity classification",
+                reason=reason or DEVICE_METRIC_REASONS.get(metric, DEFAULT_DEVICE_REASON),
                 scope=f"rank={rank}; training_step={mapping.training_step}",
             )
         rows.append(
@@ -501,7 +513,8 @@ def analyze_traces(
     if not step_map:
         warnings.append("no explicit step mapping; training-step measurements unavailable")
     warnings.append(
-        "device metrics unavailable without validated attribution; "
+        "device metrics unavailable without validated attribution; only kernel ranges tied to "
+        "a step by host launch correlation are attributed (device_attributed_kernel_ms); "
         "raw events preserved in source traces"
     )
     return sorted(rows, key=lambda row: row["training_step"]), warnings
