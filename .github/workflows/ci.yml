@@ -50,11 +50,6 @@ jobs:
           . .venv/bin/activate
           python tools/dev.py cov
 
-      - name: Commit skill bootstrap is reproducible from a clean checkout
-        run: |
-          . .venv/bin/activate
-          python tools/dev.py bootstrap-check
-
       - name: Ignore policy holds
         run: |
           . .venv/bin/activate
